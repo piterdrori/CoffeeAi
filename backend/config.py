@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     DEFAULT_MODEL: str = "llama3.2"
     DEFAULT_MODEL_PROVIDER: str = "ollama"
 
+    # External APK download (GitHub Releases, etc.) when not stored on this server.
+    APK_DOWNLOAD_URL: str = ""
+
     @property
     def chroma_dir(self) -> Path:
         return self.DATA_DIR / "chroma"

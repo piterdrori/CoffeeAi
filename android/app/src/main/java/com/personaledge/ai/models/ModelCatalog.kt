@@ -11,6 +11,8 @@ data class ModelEntry(
     val supportsVision: Boolean,
     val supportsAudio: Boolean,
     val minRamGb: Int,
+    /** Shipped inside the APK assets/models/ folder — no download required. */
+    val isBundled: Boolean = false,
 )
 
 object ModelCatalog {
@@ -21,14 +23,15 @@ object ModelCatalog {
         ModelEntry(
             id = GEMMA3_1B_ID,
             displayName = "Gemma 3 1B IT",
-            description = "Fast text chat, low RAM (~530 MB)",
+            description = "Fast text chat, built into the app (~620 MB)",
             fileName = "gemma3-1b-it-int4.litertlm",
             downloadUrl = "https://huggingface.co/litert-community/Gemma3-1B-IT/resolve/main/gemma3-1b-it-int4.litertlm",
             sizeBytes = 620_000_000L,
-            isGated = true,
+            isGated = false,
             supportsVision = false,
             supportsAudio = false,
             minRamGb = 4,
+            isBundled = true,
         ),
         ModelEntry(
             id = GEMMA4_E2B_ID,

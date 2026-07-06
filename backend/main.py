@@ -8,7 +8,7 @@ from typing import Any
 import aiofiles
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -25,6 +25,7 @@ PUBLIC_PATHS = {
     "/admin/",
     "/download/apk",
     "/download/apk/info",
+    "/v1/app/version",
     "/v1/connection-hints",
 }
 
@@ -55,6 +56,13 @@ class SyncMergeRequest(BaseModel):
 
 class SyncPushRequest(BaseModel):
     turns: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class SupportMessageRequest(BaseModel):
+    name: str = ""
+    email: str = ""
+    message: str = Field(min_length=1)
+    session_id: str = ""
 
 
 app = FastAPI(title="Personal Edge AI Backend", version="0.1.0")
@@ -247,6 +255,33 @@ async def sync_mirror(provider=Depends(get_provider)) -> dict[str, Any]:
     return {"exported": True, "mirror": result}
 
 
+@app.post("/v1/support/message")
+async def support_message(body: SupportMessageRequest) -> dict[str, Any]:
+    settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    inbox = settings.DATA_DIR / "support_messages.jsonl"
+    entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "name": body.name.strip(),
+        "email": body.email.strip(),
+        "message": body.message.strip(),
+        "session_id": body.session_id.strip(),
+    }
+    with inbox.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    return {"success": True, "id": entry["timestamp"]}
+
+
+@app.get("/v1/support/messages")
+async def list_support_messages(limit: int = 50) -> dict[str, Any]:
+    inbox = settings.DATA_DIR / "support_messages.jsonl"
+    if not inbox.exists():
+        return {"messages": [], "count": 0}
+    lines = inbox.read_text(encoding="utf-8").splitlines()
+    messages = [json.loads(line) for line in lines[-limit:] if line.strip()]
+    messages.reverse()
+    return {"messages": messages, "count": len(messages)}
+
+
 @app.get("/")
 async def home_page() -> FileResponse:
     return _serve_web_page("index.html")
@@ -275,39 +310,97 @@ def _load_release_meta() -> dict[str, Any]:
     return {}
 
 
-@app.get("/download/apk/info")
-async def apk_info() -> dict[str, Any]:
+def _load_app_version_meta() -> dict[str, Any]:
+    path = settings.DATA_DIR / "app_version.json"
+    if not path.exists():
+        path = Path(__file__).resolve().parent / "data" / "app_version.json"
+    if path.exists():
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    return {}
+
+
+def _resolve_apk_download_url() -> str | None:
+    if settings.APK_DOWNLOAD_URL.strip():
+        return settings.APK_DOWNLOAD_URL.strip()
+    url = _load_app_version_meta().get("download_url")
+    return url.strip() if isinstance(url, str) and url.strip() else None
+
+
+def _apk_info_payload() -> dict[str, Any]:
     apk = settings.apk_path
-    if not apk.exists() or apk.stat().st_size == 0:
+    release_meta = _load_release_meta()
+    app_meta = _load_app_version_meta()
+    local_available = apk.exists() and apk.stat().st_size > 0
+    download_url = _resolve_apk_download_url()
+    version = release_meta.get("version") or app_meta.get("version", "1.0")
+    updated_at = release_meta.get("updated_at") or app_meta.get("updated_at")
+
+    if local_available:
+        stat = apk.stat()
         return {
-            "available": False,
-            "message": "No APK published yet. Run scripts\\publish-apk.ps1 on your PC.",
+            "available": True,
+            "source": "local",
+            "filename": apk.name,
+            "size_bytes": stat.st_size,
+            "version": version,
+            "updated_at": updated_at or datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            "download_url": "/download/apk",
         }
-    meta = _load_release_meta()
-    stat = apk.stat()
+
+    if download_url:
+        return {
+            "available": True,
+            "source": "external",
+            "filename": app_meta.get("apk_filename", "personal-edge-ai.apk"),
+            "size_bytes": app_meta.get("apk_size_bytes") or release_meta.get("size_bytes"),
+            "version": version,
+            "updated_at": updated_at,
+            "download_url": download_url,
+        }
+
     return {
-        "available": True,
-        "filename": apk.name,
-        "size_bytes": stat.st_size,
-        "version": meta.get("version", "1.0"),
-        "updated_at": meta.get("updated_at") or datetime.fromtimestamp(
-            stat.st_mtime, tz=timezone.utc
-        ).isoformat(),
+        "available": False,
+        "version": version,
+        "updated_at": updated_at,
+        "message": "No APK published yet. Run scripts\\publish-apk.ps1 on your PC.",
     }
 
 
+@app.get("/v1/app/version")
+async def app_version() -> dict[str, Any]:
+    info = _apk_info_payload()
+    app_meta = _load_app_version_meta()
+    return {
+        "version": info.get("version", "1.0"),
+        "version_code": app_meta.get("version_code"),
+        "updated_at": info.get("updated_at"),
+        "apk_available": info.get("available", False),
+        "apk_size_bytes": info.get("size_bytes"),
+        "download_url": info.get("download_url"),
+        "notes": app_meta.get("notes"),
+    }
+
+
+@app.get("/download/apk/info")
+async def apk_info() -> dict[str, Any]:
+    return _apk_info_payload()
+
+
 @app.get("/download/apk")
-async def download_apk() -> FileResponse:
+async def download_apk():
     apk = settings.apk_path
-    if not apk.exists() or apk.stat().st_size == 0:
-        raise HTTPException(
-            status_code=404,
-            detail="APK not available. Run scripts\\publish-apk.ps1 on your PC first.",
+    if apk.exists() and apk.stat().st_size > 0:
+        return FileResponse(
+            apk,
+            media_type="application/vnd.android.package-archive",
+            filename="personal-edge-ai.apk",
         )
-    return FileResponse(
-        apk,
-        media_type="application/vnd.android.package-archive",
-        filename="personal-edge-ai.apk",
+    external = _resolve_apk_download_url()
+    if external:
+        return RedirectResponse(external, status_code=302)
+    raise HTTPException(
+        status_code=404,
+        detail="APK not available. Run scripts\\publish-apk.ps1 on your PC first.",
     )
 
 

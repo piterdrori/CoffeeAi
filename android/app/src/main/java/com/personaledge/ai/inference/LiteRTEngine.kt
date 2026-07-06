@@ -73,16 +73,16 @@ class LiteRTEngine(
         entry: ModelEntry,
         modelFile: File,
         preferGpu: Boolean = true,
-    ) {
+    ): InferenceBackend {
         if (preferGpu) {
             try {
                 loadModel(entry, modelFile, InferenceBackend.GPU)
-                return
+                return InferenceBackend.GPU
             } catch (_: Exception) {
-                // fall through to CPU
             }
         }
         loadModel(entry, modelFile, InferenceBackend.CPU, useGpuForVision = false)
+        return InferenceBackend.CPU
     }
 
     suspend fun startConversation(

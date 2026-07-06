@@ -11,8 +11,9 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven { url = uri("https://xdcobra.github.io/maven/") }
     }
 }
 
-rootProject.name = "PersonalEdgeAI"
+rootProject.name = "CoffeeAI"
 include(":app")

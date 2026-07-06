@@ -1,0 +1,9 @@
+﻿{
+    "version":  "1.2",
+    "apk_filename":  "personal-edge-ai.apk",
+    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.2/personal-edge-ai.apk",
+    "notes":  "CoffeeAI v1.2 - improved STT, TTS stability, faster chat",
+    "apk_size_bytes":  1230367176,
+    "version_code":  3,
+    "updated_at":  "2026-07-06T08:09:40.9169390Z"
+}

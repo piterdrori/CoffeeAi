@@ -13,8 +13,11 @@ android {
         applicationId = "com.personaledge.ai"
         minSdk = 31
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.2"
+
+        buildConfigField("String", "CLOUD_URL", "\"https://personal-edge-ai.vercel.app\"")
+        buildConfigField("String", "CLOUD_API_KEY", "\"dev-api-key-change-me\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -43,11 +46,22 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+
+    androidResources {
+        noCompress += listOf("litertlm", "onnx", "bin", "fst", "far")
+    }
+
+    packaging {
+        jniLibs {
+            pickFirsts += listOf("**/libonnxruntime.so", "**/libsherpa-onnx-jni.so")
         }
     }
 }
@@ -92,8 +106,7 @@ dependencies {
 
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.13.1")
 
-    // Vosk 0.3.47 is published on Maven Central (com.alphacephei:vosk-android)
-    implementation("com.alphacephei:vosk-android:0.3.47")
+    implementation("com.xdcobra.sherpa:sherpa-onnx:1.13.2-1")
 
     implementation("io.coil-kt:coil-compose:2.6.0")
     implementation("androidx.camera:camera-camera2:1.3.4")

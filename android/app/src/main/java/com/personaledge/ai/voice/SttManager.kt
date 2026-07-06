@@ -1,28 +1,32 @@
 package com.personaledge.ai.voice
 
 import android.content.Context
-import android.content.Intent
-import android.os.Build
-import android.os.Bundle
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import com.k2fsa.sherpa.onnx.OnlineRecognizer
+import com.k2fsa.sherpa.onnx.OnlineStream
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import org.vosk.Model
-import org.vosk.Recognizer
-import org.vosk.android.RecognitionListener as VoskRecognitionListener
-import org.vosk.android.SpeechService
-import org.vosk.android.StorageService
-import java.io.File
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
-class SttManager(private val context: Context) {
-    private enum class Backend { ANDROID, VOSK }
+class SttManager(context: Context) {
+    private val appContext = context.applicationContext
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val engineMutex = Mutex()
 
-    private var backend: Backend? = null
-    private var voskModel: Model? = null
-    private var voskService: SpeechService? = null
-    private var androidRecognizer: SpeechRecognizer? = null
+    private var recognizer: OnlineRecognizer? = null
+    private var audioRecord: AudioRecord? = null
+    private var stream: OnlineStream? = null
+    private var listenJob: Job? = null
 
     private val _isListening = MutableStateFlow(false)
     val isListening: StateFlow<Boolean> = _isListening
@@ -50,202 +54,123 @@ class SttManager(private val context: Context) {
             onReady?.invoke()
             return
         }
-        _isModelLoading.value = true
-        _error.value = null
-
-        if (SpeechRecognizer.isRecognitionAvailable(context)) {
-            try {
-                androidRecognizer = SpeechRecognizer.createSpeechRecognizer(context)
-                backend = Backend.ANDROID
-                _backendLabel.value = "Android speech (high accuracy)"
-                _isModelReady.value = true
-                _isModelLoading.value = false
-                onReady?.invoke()
-                return
-            } catch (e: Exception) {
-                androidRecognizer = null
+        scope.launch {
+            engineMutex.withLock {
+                if (_isModelReady.value) {
+                    onReady?.invoke()
+                    return@withLock
+                }
+                _isModelLoading.value = true
+                _error.value = null
+                try {
+                    if (!BundledAssetCopier.hasAssetDir(appContext.assets, SherpaVoiceConfig.STT_ASSET_DIR)) {
+                        _error.value =
+                            "Built-in STT model missing. Rebuild APK with scripts/fetch-bundled-voice-models.ps1"
+                        return@withLock
+                    }
+                    val modelRoot = withContext(Dispatchers.IO) {
+                        BundledAssetCopier.ensureDirOnDisk(appContext, SherpaVoiceConfig.STT_ASSET_DIR)
+                    }
+                    recognizer = OnlineRecognizer(
+                        assetManager = null,
+                        config = SherpaVoiceConfig.sttRecognizerConfig(modelRoot),
+                    )
+                    _backendLabel.value = SherpaVoiceConfig.STT_LABEL
+                    _isModelReady.value = true
+                    onReady?.invoke()
+                } catch (e: Exception) {
+                    _error.value = "Failed to load built-in STT: ${e.message}"
+                } finally {
+                    _isModelLoading.value = false
+                }
             }
         }
-
-        loadVoskModel(onReady)
-    }
-
-    private fun loadVoskModel(onReady: (() -> Unit)?) {
-        if (voskModel != null) {
-            backend = Backend.VOSK
-            _backendLabel.value = "Vosk offline"
-            _isModelReady.value = true
-            _isModelLoading.value = false
-            onReady?.invoke()
-            return
-        }
-
-        val modelDir = File(context.filesDir, "vosk-model")
-        if (modelDir.exists() && File(modelDir, "am").exists()) {
-            try {
-                voskModel = Model(modelDir.absolutePath)
-                backend = Backend.VOSK
-                _backendLabel.value = "Vosk offline"
-                _isModelReady.value = true
-                _isModelLoading.value = false
-                onReady?.invoke()
-            } catch (e: Exception) {
-                _isModelLoading.value = false
-                _error.value = "Failed to load Vosk model: ${e.message}"
-            }
-            return
-        }
-
-        StorageService.unpack(
-            context,
-            "model-en-us",
-            "model",
-            { loaded ->
-                voskModel = loaded
-                backend = Backend.VOSK
-                _backendLabel.value = "Vosk offline"
-                _isModelReady.value = true
-                _isModelLoading.value = false
-                onReady?.invoke()
-            },
-            { e ->
-                _isModelLoading.value = false
-                _error.value =
-                    "No speech engine available. Run .\\scripts\\setup-vosk-emulator.ps1 — ${e.message}"
-            },
-        )
     }
 
     fun startListening() {
-        when (backend) {
-            Backend.ANDROID -> startAndroidListening()
-            Backend.VOSK -> startVoskListening()
-            null -> _error.value = "Speech model not loaded yet"
-        }
-    }
-
-    private fun startAndroidListening() {
-        val recognizer = androidRecognizer ?: run {
-            _error.value = "Android speech recognizer not ready"
+        val rec = recognizer ?: run {
+            _error.value = "Speech model not loaded yet"
             return
         }
         if (_isListening.value) return
 
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false)
+        listenJob?.cancel()
+        listenJob = scope.launch {
+            try {
+                engineMutex.withLock {
+                    if (!initMicrophone()) {
+                        _error.value = "Microphone permission required"
+                        return@withLock
+                    }
+                    stream?.release()
+                    stream = rec.createStream()
+                    _finalText.value = ""
+                    _partialText.value = ""
+                    _error.value = null
+                    _isListening.value = true
+                }
+                processSamples(rec)
+            } catch (e: Exception) {
+                _error.value = e.message ?: "Failed to start listening"
+                stopListening()
+            }
+        }
+    }
+
+    private suspend fun processSamples(rec: OnlineRecognizer) {
+        val localStream = stream ?: return
+        val bufferSize = (0.1 * SherpaVoiceConfig.SAMPLE_RATE).toInt()
+        val buffer = ShortArray(bufferSize)
+
+        withContext(Dispatchers.IO) {
+            while (isActive && _isListening.value) {
+                val read = audioRecord?.read(buffer, 0, buffer.size) ?: break
+                if (read <= 0) continue
+
+                val samples = FloatArray(read) { buffer[it] / 32768.0f }
+                localStream.acceptWaveform(samples, sampleRate = SherpaVoiceConfig.SAMPLE_RATE)
+                decodeLatest(rec, localStream, finalize = false)
             }
         }
 
-        recognizer.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                _isListening.value = true
-                _error.value = null
-            }
+        engineMutex.withLock {
+            finalizeDecode(rec, localStream)
+            releaseMicrophone()
+            stream?.release()
+            stream = null
+            _isListening.value = false
+        }
+    }
 
-            override fun onBeginningOfSpeech() = Unit
-
-            override fun onRmsChanged(rmsdB: Float) = Unit
-
-            override fun onBufferReceived(buffer: ByteArray?) = Unit
-
-            override fun onEndOfSpeech() {
-                _isListening.value = false
-            }
-
-            override fun onError(error: Int) {
-                _isListening.value = false
-                if (error != SpeechRecognizer.ERROR_CLIENT) {
-                    _error.value = androidErrorMessage(error)
+    private fun decodeLatest(rec: OnlineRecognizer, localStream: OnlineStream, finalize: Boolean) {
+        if (finalize) {
+            localStream.inputFinished()
+        }
+        while (rec.isReady(localStream)) {
+            rec.decode(localStream)
+        }
+        val text = rec.getResult(localStream).text.trim()
+        if (text.isNotBlank()) {
+            if (finalize || rec.isEndpoint(localStream)) {
+                _finalText.value = text
+                _partialText.value = ""
+                if (!finalize) {
+                    rec.reset(localStream)
                 }
-            }
-
-            override fun onResults(results: Bundle?) {
-                _isListening.value = false
-                val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    .orEmpty()
-                if (text.isNotBlank()) {
-                    _finalText.value = text
-                    _partialText.value = ""
-                }
-            }
-
-            override fun onPartialResults(partialResults: Bundle?) {
-                val text = partialResults?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    .orEmpty()
+            } else {
                 _partialText.value = text
             }
-
-            override fun onEvent(eventType: Int, params: Bundle?) = Unit
-        })
-
-        _finalText.value = ""
-        _partialText.value = ""
-        _error.value = null
-        recognizer.startListening(intent)
+        }
     }
 
-    private fun startVoskListening() {
-        val m = voskModel ?: run {
-            _error.value = "Vosk model not loaded yet"
-            return
-        }
-        if (_isListening.value) return
-
-        val recognizer = Recognizer(m, 16000.0f)
-        voskService = SpeechService(recognizer, 16000.0f)
-        voskService?.startListening(object : VoskRecognitionListener {
-            override fun onPartialResult(hypothesis: String?) {
-                _partialText.value = extractVoskText(hypothesis)
-            }
-
-            override fun onResult(hypothesis: String?) {
-                _finalText.value = extractVoskText(hypothesis)
-                _partialText.value = ""
-            }
-
-            override fun onFinalResult(hypothesis: String?) {
-                _finalText.value = extractVoskText(hypothesis)
-                _partialText.value = ""
-                _isListening.value = false
-            }
-
-            override fun onError(exception: Exception?) {
-                _error.value = exception?.message ?: "Speech recognition error"
-                _isListening.value = false
-            }
-
-            override fun onTimeout() {
-                _isListening.value = false
-            }
-        })
-        _isListening.value = true
-        _error.value = null
-        _finalText.value = ""
-        _partialText.value = ""
+    private fun finalizeDecode(rec: OnlineRecognizer, localStream: OnlineStream) {
+        decodeLatest(rec, localStream, finalize = true)
     }
 
     fun stopListening() {
-        when (backend) {
-            Backend.ANDROID -> {
-                androidRecognizer?.stopListening()
-                androidRecognizer?.cancel()
-                _isListening.value = false
-            }
-            Backend.VOSK -> {
-                voskService?.stop()
-                voskService?.shutdown()
-                voskService = null
-                _isListening.value = false
-            }
-            null -> Unit
-        }
+        _isListening.value = false
+        listenJob?.cancel()
+        listenJob = null
     }
 
     fun clearText() {
@@ -255,30 +180,51 @@ class SttManager(private val context: Context) {
 
     fun capturedText(): String = _finalText.value.ifBlank { _partialText.value }.trim()
 
-    private fun extractVoskText(hypothesis: String?): String {
-        if (hypothesis.isNullOrBlank()) return ""
-        return try {
-            val json = org.json.JSONObject(hypothesis)
-            json.optString("text", "")
-        } catch (_: Exception) {
-            hypothesis
+    private fun releaseMicrophone() {
+        audioRecord?.stop()
+        audioRecord?.release()
+        audioRecord = null
+    }
+
+    private fun initMicrophone(): Boolean {
+        val minBytes = AudioRecord.getMinBufferSize(
+            SherpaVoiceConfig.SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (minBytes == AudioRecord.ERROR || minBytes == AudioRecord.ERROR_BAD_VALUE) {
+            return false
+        }
+
+        audioRecord = AudioRecord(
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            SherpaVoiceConfig.SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            minBytes * 4,
+        )
+        if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+            audioRecord?.release()
+            audioRecord = null
+            return false
+        }
+        audioRecord?.startRecording()
+        return true
+    }
+
+    suspend fun shutdownAndAwait() {
+        stopListening()
+        engineMutex.withLock {
+            releaseMicrophone()
+            stream?.release()
+            stream = null
+            recognizer?.release()
+            recognizer = null
+            _isModelReady.value = false
         }
     }
 
-    private fun androidErrorMessage(code: Int): String = when (code) {
-        SpeechRecognizer.ERROR_AUDIO -> "Microphone error — enable host mic in emulator settings"
-        SpeechRecognizer.ERROR_NETWORK -> "Network error — check emulator internet for speech"
-        SpeechRecognizer.ERROR_NO_MATCH -> "Did not catch that — try speaking again"
-        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "No speech heard — tap orb and speak"
-        else -> "Speech error ($code)"
-    }
-
     fun shutdown() {
-        stopListening()
-        androidRecognizer?.destroy()
-        androidRecognizer = null
-        voskModel?.close()
-        voskModel = null
-        backend = null
+        scope.launch { shutdownAndAwait() }
     }
 }

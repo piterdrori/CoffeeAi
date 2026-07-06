@@ -2,20 +2,40 @@ package com.personaledge.ai.voice
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFormat
 import android.media.AudioManager
-import android.os.Build
-import android.os.Bundle
-import android.speech.tts.TextToSpeech
-import android.speech.tts.UtteranceProgressListener
-import android.speech.tts.Voice
+import android.media.AudioTrack
+import com.k2fsa.sherpa.onnx.GenerationConfig
+import com.k2fsa.sherpa.onnx.OfflineTts
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import java.util.Locale
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import java.io.File
 
-class TtsManager(context: Context) : TextToSpeech.OnInitListener {
+class TtsManager(context: Context) {
     private val appContext = context.applicationContext
-    private var tts: TextToSpeech? = TextToSpeech(appContext, this)
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val engineMutex = Mutex()
+
+    private var tts: OfflineTts? = null
+    private var audioTrack: AudioTrack? = null
+    private var speakJob: Job? = null
+
+    @Volatile
+    private var stopped = false
+
+    @Volatile
+    private var released = false
 
     private val _isReady = MutableStateFlow(false)
     val isReady: StateFlow<Boolean> = _isReady
@@ -26,77 +46,120 @@ class TtsManager(context: Context) : TextToSpeech.OnInitListener {
     private val _voiceLabel = MutableStateFlow<String?>(null)
     val voiceLabel: StateFlow<String?> = _voiceLabel
 
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error
+
     var autoReadReplies: Boolean = true
     var onSpeakComplete: (() -> Unit)? = null
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            configureOfflineVoice()
-            tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                override fun onStart(utteranceId: String?) {
-                    _isSpeaking.value = true
-                }
+    init {
+        scope.launch { initEngine() }
+    }
 
-                override fun onDone(utteranceId: String?) {
-                    _isSpeaking.value = false
-                    onSpeakComplete?.invoke()
-                }
-
-                @Deprecated("Deprecated in Java")
-                override fun onError(utteranceId: String?) {
-                    _isSpeaking.value = false
-                    onSpeakComplete?.invoke()
-                }
-
-                override fun onError(utteranceId: String?, errorCode: Int) {
-                    _isSpeaking.value = false
-                    onSpeakComplete?.invoke()
-                }
-            })
+    private suspend fun initEngine() {
+        try {
+            if (!BundledAssetCopier.hasAssetDir(appContext.assets, SherpaVoiceConfig.TTS_ASSET_DIR)) {
+                _error.value =
+                    "Built-in TTS model missing. Rebuild APK with scripts/fetch-bundled-voice-models.ps1"
+                return
+            }
+            val modelRoot = withContext(Dispatchers.IO) {
+                BundledAssetCopier.ensureDirOnDisk(appContext, SherpaVoiceConfig.TTS_ASSET_DIR)
+            }
+            val dataDir = File(modelRoot, "espeak-ng-data").absolutePath
+            engineMutex.withLock {
+                if (released) return
+                val engine = OfflineTts(
+                    assetManager = null,
+                    config = SherpaVoiceConfig.ttsConfig(modelRoot, dataDir),
+                )
+                initAudioTrack(engine.sampleRate())
+                tts = engine
+            }
+            _voiceLabel.value = SherpaVoiceConfig.TTS_LABEL
             _isReady.value = true
+        } catch (e: Exception) {
+            _error.value = "Failed to load built-in TTS: ${e.message}"
         }
     }
 
-    private fun configureOfflineVoice() {
-        val engine = tts ?: return
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            engine.setAudioAttributes(
-                AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .setLegacyStreamType(AudioManager.STREAM_MUSIC)
-                    .build(),
-            )
-        }
+    private fun initAudioTrack(sampleRate: Int) {
+        val bufferSize = AudioTrack.getMinBufferSize(
+            sampleRate,
+            AudioFormat.CHANNEL_OUT_MONO,
+            AudioFormat.ENCODING_PCM_FLOAT,
+        )
+        val attr = AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+        val format = AudioFormat.Builder()
+            .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
+            .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+            .setSampleRate(sampleRate)
+            .build()
+        audioTrack = AudioTrack(
+            attr,
+            format,
+            bufferSize,
+            AudioTrack.MODE_STREAM,
+            AudioManager.AUDIO_SESSION_ID_GENERATE,
+        )
+    }
 
-        val voices = engine.voices ?: emptySet()
-        val offlineEnglish = voices.filter { voice ->
-            voice.locale.language.equals("en", ignoreCase = true) &&
-                !voice.name.contains("fallback", true) &&
-                !voice.isNetworkConnectionRequired
+    private fun onAudioChunk(samples: FloatArray): Int {
+        if (stopped || released) {
+            audioTrack?.stop()
+            return 0
         }
-        val preferred = offlineEnglish
-            .sortedWith(
-                compareByDescending<Voice> { voice ->
-                    when {
-                        voice.quality >= Voice.QUALITY_VERY_HIGH -> 4
-                        voice.quality >= Voice.QUALITY_HIGH -> 3
-                        voice.quality >= Voice.QUALITY_NORMAL -> 2
-                        else -> 1
+        audioTrack?.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
+        return 1
+    }
+
+    fun speak(text: String) {
+        if (released || !_isReady.value || text.isBlank()) return
+        val cleaned = text
+            .replace(Regex("```[\\s\\S]*?```"), " code block ")
+            .replace(Regex("\\*\\*|__"), "")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+        if (cleaned.isBlank()) return
+
+        speakJob?.cancel()
+        speakJob = scope.launch {
+            engineMutex.withLock {
+                if (released || !isActive) return@withLock
+                val engine = tts ?: return@withLock
+                ensureAudibleVolume()
+                stopped = false
+                _isSpeaking.value = true
+                try {
+                    withContext(Dispatchers.IO) {
+                        if (!isActive || released) return@withContext
+                        audioTrack?.pause()
+                        audioTrack?.flush()
+                        audioTrack?.play()
+                        engine.generateWithConfigAndCallback(
+                            text = cleaned,
+                            config = GenerationConfig(sid = 0, speed = 0.95f),
+                            callback = ::onAudioChunk,
+                        )
                     }
-                },
-            )
-            .firstOrNull()
-
-        if (preferred != null) {
-            engine.voice = preferred
-            _voiceLabel.value = "Offline · ${preferred.name}"
-        } else {
-            engine.language = Locale.US
-            _voiceLabel.value = "Offline · system default"
+                } catch (e: Exception) {
+                    if (isActive) {
+                        _error.value = e.message ?: "TTS failed"
+                    }
+                } finally {
+                    if (isActive) {
+                        stopped = true
+                        _isSpeaking.value = false
+                        audioTrack?.pause()
+                        audioTrack?.flush()
+                        onSpeakComplete?.invoke()
+                    }
+                }
+            }
         }
-        engine.setSpeechRate(0.95f)
-        engine.setPitch(1.0f)
     }
 
     private fun ensureAudibleVolume() {
@@ -109,29 +172,32 @@ class TtsManager(context: Context) : TextToSpeech.OnInitListener {
         }
     }
 
-    fun speak(text: String) {
-        if (!_isReady.value || text.isBlank()) return
-        val cleaned = text
-            .replace(Regex("```[\\s\\S]*?```"), " code block ")
-            .replace(Regex("\\*\\*|__"), "")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-        if (cleaned.isBlank()) return
-        ensureAudibleVolume()
-        val params = Bundle().apply {
-            putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1.0f)
-        }
-        tts?.speak(cleaned, TextToSpeech.QUEUE_FLUSH, params, "edge_ai_tts")
-    }
-
     fun stop() {
-        tts?.stop()
+        stopped = true
+        speakJob?.cancel()
+        speakJob = null
         _isSpeaking.value = false
+        audioTrack?.pause()
+        audioTrack?.flush()
     }
 
-    fun shutdown() {
-        tts?.stop()
-        tts?.shutdown()
-        tts = null
+    /** Only for process teardown; screens should call [stop] when leaving. */
+    suspend fun shutdownAndAwait() {
+        engineMutex.withLock {
+            if (released) return
+            released = true
+            stopped = true
+            speakJob?.cancel()
+            speakJob?.join()
+            speakJob = null
+            try {
+                tts?.release()
+            } catch (_: Exception) {
+            }
+            tts = null
+            audioTrack?.release()
+            audioTrack = null
+        }
+        scope.cancel()
     }
 }

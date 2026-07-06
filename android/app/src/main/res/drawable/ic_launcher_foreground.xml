@@ -1,9 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Steam -->
     <path
-        android:fillColor="#2DD4BF"
-        android:pathData="M54,30 L72,54 L54,78 L36,54 Z" />
+        android:fillColor="#00000000"
+        android:pathData="M42,41 C38,34 46,18 42,9"
+        android:strokeWidth="4.5"
+        android:strokeColor="#6F3C1E"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,41 C50,34 58,18 54,9"
+        android:strokeWidth="4.5"
+        android:strokeColor="#6F3C1E"
+        android:strokeLineCap="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M66,41 C62,34 70,18 66,9"
+        android:strokeWidth="4.5"
+        android:strokeColor="#6F3C1E"
+        android:strokeLineCap="round" />
+    <!-- Waveform bars -->
+    <path
+        android:fillColor="#6F3C1E"
+        android:pathData="M30,69 h7 a3.5,3.5 0 0,1 0,-24 h-7 a3.5,3.5 0 0,1 0,24 z" />
+    <path
+        android:fillColor="#6F3C1E"
+        android:pathData="M41,69 h7 a3.5,3.5 0 0,1 0,-41 h-7 a3.5,3.5 0 0,1 0,41 z" />
+    <path
+        android:fillColor="#6F3C1E"
+        android:pathData="M52,69 h7 a3.5,3.5 0 0,1 0,-30 h-7 a3.5,3.5 0 0,1 0,30 z" />
+    <path
+        android:fillColor="#6F3C1E"
+        android:pathData="M63,69 h7 a3.5,3.5 0 0,1 0,-45 h-7 a3.5,3.5 0 0,1 0,45 z" />
+    <path
+        android:fillColor="#6F3C1E"
+        android:pathData="M74,69 h7 a3.5,3.5 0 0,1 0,-26 h-7 a3.5,3.5 0 0,1 0,26 z" />
 </vector>

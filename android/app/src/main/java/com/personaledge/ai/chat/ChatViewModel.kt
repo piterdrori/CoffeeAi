@@ -6,6 +6,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.personaledge.ai.EdgeAiApplication
 import com.personaledge.ai.inference.ChatTurn
+import com.personaledge.ai.inference.InferenceBackend
 import com.personaledge.ai.inference.MemoryContext
 import com.personaledge.ai.inference.LiteRTEngine
 import com.personaledge.ai.models.ModelCatalog
@@ -20,6 +21,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
+import java.util.UUID
 
 data class UiMessage(
     val role: String,
@@ -47,10 +49,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as EdgeAiApplication
     private val modelRepository = app.modelRepository
     private val syncClient = app.syncClient
+    private val sessionStore = app.chatSessionStore
     private val engine = LiteRTEngine(application)
+
+    private var currentSessionId: String? = null
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+
+    val activeSessionId: String? get() = currentSessionId
 
     init {
         viewModelScope.launch {
@@ -58,6 +65,51 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 loadActiveModel()
             }
         }
+    }
+
+    fun loadSession(sessionId: String) {
+        if (currentSessionId == sessionId && _uiState.value.messages.isNotEmpty()) return
+        currentSessionId = sessionId
+        viewModelScope.launch { loadSessionInternal(sessionId) }
+    }
+
+    suspend fun prepareNewSession(sessionId: String = UUID.randomUUID().toString()): String {
+        currentSessionId = sessionId
+        val accent = sessionId.hashCode().mod(4).let { if (it < 0) -it else it }
+        sessionStore.createSession(sessionId, "New Chat", "", accent)
+        clearChatInternal()
+        return sessionId
+    }
+
+    fun persistSession() {
+        viewModelScope.launch { persistCurrentSession() }
+    }
+
+    private suspend fun loadSessionInternal(sessionId: String) {
+        val stored = sessionStore.messagesFor(sessionId)
+        val messages = stored.map { UiMessage(it.role, it.content, imageUri = it.imageUri) }
+        _uiState.update {
+            it.copy(messages = messages, inputText = "", error = null, pendingImagePath = null, pendingImageUri = null)
+        }
+        if (engine.isLoaded) {
+            val memory = syncClient.offlineContext()
+            val history = messages.map { ChatTurn(it.role, it.content) }
+            engine.startConversation(memory, history)
+        }
+    }
+
+    private suspend fun persistCurrentSession() {
+        val sessionId = currentSessionId ?: return
+        val messages = _uiState.value.messages.filter { !it.isStreaming }
+        sessionStore.saveMessages(sessionId, messages)
+        val firstUser = messages.firstOrNull { it.role == "user" && it.content.isNotBlank() }?.content?.trim()
+        val title = firstUser?.let { snippet ->
+            if (snippet.length > 48) "${snippet.take(48)}…" else snippet
+        } ?: "New Chat"
+        val preview = messages.lastOrNull { it.content.isNotBlank() }?.content?.trim()?.let { text ->
+            if (text.length > 80) "${text.take(80)}…" else text
+        } ?: ""
+        sessionStore.updateSessionMeta(sessionId, title, preview)
     }
 
     fun updateInput(text: String) {
@@ -76,12 +128,47 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ?: ModelCatalog.models.firstOrNull { modelRepository.isDownloaded(it) }
             ?: ModelCatalog.defaultModel()
 
-        if (!modelRepository.isDownloaded(primary)) {
+        if (primary.isBundled && !modelRepository.hasBundledAsset(primary)) {
+            _uiState.update {
+                it.copy(
+                    isEngineReady = false,
+                    activeModelName = primary.displayName,
+                    activeModelId = primary.id,
+                    engineStatus = "Built-in model missing",
+                    error = "Rebuild the APK with the bundled Gemma model (see scripts/fetch-bundled-gemma-model.ps1).",
+                )
+            }
+            return
+        }
+
+        if (primary.isBundled && !modelRepository.isInstalledOnDisk(primary)) {
+            _uiState.update {
+                it.copy(
+                    engineStatus = "Installing built-in model…",
+                    activeModelName = primary.displayName,
+                    activeModelId = primary.id,
+                )
+            }
+            if (!modelRepository.ensureOnDisk(primary)) {
+                _uiState.update {
+                    it.copy(
+                        isEngineReady = false,
+                        engineStatus = "Install failed",
+                        error = "Could not install ${primary.displayName} from app package.",
+                    )
+                }
+                return
+            }
+        }
+
+        if (!modelRepository.isInstalledOnDisk(primary)) {
             val partial = modelRepository.getDownloadedSize(primary)
             val msg = if (partial > 0) {
-                "${primary.displayName} download incomplete. Delete and re-download in Settings."
+                "${primary.displayName} is still installing. Please wait a moment and try again."
+            } else if (primary.isBundled) {
+                "CoffeeAI is preparing its built-in model. This can take a few minutes on first launch."
             } else {
-                "Download ${primary.displayName} in Settings → Models."
+                "${primary.displayName} is not available yet."
             }
             _uiState.update {
                 it.copy(
@@ -103,7 +190,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
         val primaryError = loadResult.exceptionOrNull() ?: Exception("Failed to load model")
         val fallback = ModelCatalog.models.firstOrNull {
-            it.id != primary.id && modelRepository.isDownloaded(it)
+            it.id != primary.id && modelRepository.isInstalledOnDisk(it)
         }
         if (fallback != null) {
             val fallbackResult = tryLoadEntry(fallback, preferGpu)
@@ -133,13 +220,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun tryLoadEntry(entry: ModelEntry, preferGpu: Boolean): Result<MemoryContext?> {
         return try {
-            engine.loadModelWithFallback(entry, modelRepository.getModelFile(entry), preferGpu = preferGpu)
-            val memory = try {
-                syncClient.prefetch("")
-            } catch (_: Exception) {
-                null
+            val backend = engine.loadModelWithFallback(entry, modelRepository.getModelFile(entry), preferGpu = preferGpu)
+            if (preferGpu && backend == InferenceBackend.CPU) {
+                syncClient.disableGpu()
             }
-            engine.startConversation(memory ?: MemoryContext())
+            val memory = syncClient.offlineContext()
+            engine.startConversation(memory)
             Result.success(memory)
         } catch (e: Exception) {
             Result.failure(e)
@@ -214,7 +300,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             if (!_uiState.value.isEngineReady) {
                 loadActiveModelInternal()
                 if (!_uiState.value.isEngineReady) {
-                    val err = _uiState.value.error ?: "Model not ready. Check Settings → Models."
+                    val err = _uiState.value.error ?: "CoffeeAI is still starting up. Please wait a moment."
                     _uiState.update {
                         it.copy(
                             inputText = "",
@@ -244,17 +330,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             try {
-                val memory = try {
-                    syncClient.prefetch(prompt)
-                } catch (_: Exception) {
-                    null
-                }
-                _uiState.update { it.copy(memoryConnected = memory != null) }
+                val memory = syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
+                _uiState.update { it.copy(memoryConnected = memory.memoryChunks.isNotEmpty()) }
                 val history = _uiState.value.messages
                     .filter { !it.isStreaming }
                     .dropLast(1)
                     .map { ChatTurn(it.role, it.content) }
-                engine.startConversation(memory ?: MemoryContext(), history)
+                engine.startConversation(memory, history)
 
                 val streamingIndex = _uiState.value.messages.size
                 _uiState.update {
@@ -290,7 +372,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     state.copy(messages = updated, isLoading = false, orbState = OrbState.Idle)
                 }
-                syncClient.syncTurn(prompt, finalResponse)
+                viewModelScope.launch { syncClient.syncTurn(prompt, finalResponse) }
+                persistCurrentSession()
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -309,16 +392,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun clearChat() {
+        viewModelScope.launch { clearChatInternal() }
+    }
+
+    private suspend fun clearChatInternal() {
         _uiState.update { it.copy(messages = emptyList()) }
-        viewModelScope.launch {
-            if (engine.isLoaded) {
-                val memory = try {
-                    syncClient.prefetch("")
-                } catch (_: Exception) {
-                    null
-                }
-                engine.startConversation(memory ?: MemoryContext())
-            }
+        currentSessionId?.let { sessionStore.saveMessages(it, emptyList()) }
+        if (engine.isLoaded) {
+            engine.startConversation(syncClient.offlineContext())
         }
     }
 

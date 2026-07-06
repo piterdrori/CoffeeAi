@@ -5,10 +5,12 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.personaledge.ai.BuildConfig
 import com.personaledge.ai.inference.MemoryContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -20,11 +22,13 @@ import java.util.concurrent.TimeUnit
 
 private val Context.syncDataStore by preferencesDataStore("sync_prefs")
 
+private const val DEFAULT_CLOUD_URL = BuildConfig.CLOUD_URL
+
 data class BackendConfig(
-    val localUrl: String = "http://192.168.1.100:8080",
-    val cloudUrl: String = "",
-    val apiKey: String = "",
-    val useGpu: Boolean = true,
+    val localUrl: String = "",
+    val cloudUrl: String = DEFAULT_CLOUD_URL,
+    val apiKey: String = BuildConfig.CLOUD_API_KEY,
+    val useGpu: Boolean = false,
     val autoTts: Boolean = true,
 )
 
@@ -38,15 +42,20 @@ class SyncClient(
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
+    private val quickClient = OkHttpClient.Builder()
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(3, TimeUnit.SECONDS)
+        .build()
+
     val sessionId: String = UUID.randomUUID().toString()
 
     suspend fun getBackendConfig(): BackendConfig {
         val prefs = context.syncDataStore.data.first()
         return BackendConfig(
-            localUrl = prefs[localUrlKey] ?: "http://192.168.1.100:8080",
-            cloudUrl = prefs[cloudUrlKey] ?: "",
-            apiKey = prefs[apiKeyKey] ?: "",
-            useGpu = prefs[useGpuKey] ?: true,
+            localUrl = prefs[localUrlKey].orEmpty(),
+            cloudUrl = prefs[cloudUrlKey]?.takeIf { it.isNotBlank() } ?: DEFAULT_CLOUD_URL,
+            apiKey = prefs[apiKeyKey]?.takeIf { it.isNotBlank() } ?: BuildConfig.CLOUD_API_KEY,
+            useGpu = prefs[useGpuKey] ?: false,
             autoTts = prefs[autoTtsKey] ?: true,
         )
     }
@@ -62,9 +71,27 @@ class SyncClient(
     }
 
     suspend fun prefetch(query: String): MemoryContext = withContext(Dispatchers.IO) {
+        prefetchInternal(query, client)
+    }
+
+    /** Best-effort prefetch with a short deadline so chat is not blocked on slow networks. */
+    suspend fun prefetchQuick(query: String, timeoutMs: Long = 2_500L): MemoryContext? =
+        withContext(Dispatchers.IO) {
+            withTimeoutOrNull(timeoutMs) {
+                try {
+                    prefetchInternal(query, quickClient)
+                } catch (_: Exception) {
+                    null
+                }
+            }
+        }
+
+    suspend fun offlineContext(): MemoryContext = getOfflineContext()
+
+    private suspend fun prefetchInternal(query: String, httpClient: OkHttpClient): MemoryContext {
         val config = getBackendConfig()
         val body = JSONObject().put("query", query).toString()
-        val response = postWithFallback("/v1/memory/prefetch", body, config)
+        val response = postWithFallback("/v1/memory/prefetch", body, config, httpClient)
         if (response != null) {
             val json = JSONObject(response)
             val configObj = json.optJSONObject("config")
@@ -94,7 +121,7 @@ class SyncClient(
                     },
                 )
             }
-            MemoryContext(
+            return MemoryContext(
                 systemPrompt = configObj?.optString("system_prompt") ?: getCachedConfig()?.systemPrompt
                     ?: "You are a helpful personal assistant.",
                 personalityRules = configObj?.optString("personality_rules")
@@ -102,7 +129,14 @@ class SyncClient(
                 memoryChunks = chunks.ifEmpty { dao.getMemoryTexts() },
             )
         } else {
-            getOfflineContext()
+            return getOfflineContext()
+        }
+    }
+
+    suspend fun disableGpu() {
+        val config = getBackendConfig()
+        if (config.useGpu) {
+            saveBackendConfig(config.copy(useGpu = false))
         }
     }
 
@@ -129,7 +163,7 @@ class SyncClient(
     suspend fun pullFullSync() = withContext(Dispatchers.IO) {
         val config = getBackendConfig()
         val response = postWithFallback("/v1/sync/pull", "{}", config)
-            ?: error("Backend unreachable — check URL and API key in Settings")
+            ?: error("Could not reach CoffeeAI cloud — memories will sync when you're back online")
         val json = JSONObject(response)
         val configObj = json.getJSONObject("config")
         dao.saveConfig(
@@ -190,6 +224,18 @@ class SyncClient(
         }
     }
 
+    suspend fun sendSupportMessage(name: String, email: String, message: String): Boolean =
+        withContext(Dispatchers.IO) {
+            val config = getBackendConfig()
+            val body = JSONObject()
+                .put("name", name)
+                .put("email", email)
+                .put("message", message)
+                .put("session_id", sessionId)
+                .toString()
+            postWithFallback("/v1/support/message", body, config) != null
+        }
+
     private suspend fun getCachedConfig(): CachedConfigEntity? = dao.getConfig()
 
     private suspend fun getOfflineContext(): MemoryContext {
@@ -201,7 +247,12 @@ class SyncClient(
         )
     }
 
-    private fun postWithFallback(path: String, body: String, config: BackendConfig): String? {
+    private fun postWithFallback(
+        path: String,
+        body: String,
+        config: BackendConfig,
+        httpClient: OkHttpClient = client,
+    ): String? {
         val urls = listOfNotNull(
             config.localUrl.takeIf { it.isNotBlank() },
             config.cloudUrl.takeIf { it.isNotBlank() },
@@ -218,7 +269,7 @@ class SyncClient(
                         }
                     }
                     .build()
-                client.newCall(request).execute().use { response ->
+                httpClient.newCall(request).execute().use { response ->
                     when {
                         response.isSuccessful -> return response.body?.string()
                         response.code == 401 -> authFailure = true
@@ -229,7 +280,7 @@ class SyncClient(
             }
         }
         if (authFailure) {
-            error("Invalid API key — use the key from backend .env (default: dev-api-key-change-me)")
+            error("Could not authenticate with CoffeeAI cloud")
         }
         return null
     }

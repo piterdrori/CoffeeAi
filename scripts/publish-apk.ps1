@@ -54,6 +54,35 @@ if (Test-Path "C:\Windows\System32\ASProxy64.dll") {
     Write-Warning "ASProxy64.dll detected - may crash Java/Gradle. Run Astrill LSP uninstall or: RegisterLSP64.exe -f (as Admin)"
 }
 
+$voiceScript = Join-Path $Root "scripts\fetch-bundled-voice-models.ps1"
+if (Test-Path $voiceScript) {
+    Write-Host "==> Ensuring bundled STT/TTS models in APK assets..." -ForegroundColor Cyan
+    try {
+        & $voiceScript
+    } catch {
+        if (-not (Test-Path (Join-Path $Root "android\app\src\main\assets\voice\stt"))) {
+            throw "Bundled voice models missing. Run .\scripts\fetch-bundled-voice-models.ps1`n$($_.Exception.Message)"
+        }
+        Write-Warning "Could not refresh voice models (using existing files): $($_.Exception.Message)"
+    }
+}
+
+$fetchScript = Join-Path $Root "scripts\fetch-bundled-gemma-model.ps1"
+$bundledModel = Join-Path $Root "android\app\src\main\assets\models\gemma3-1b-it-int4.litertlm"
+if (Test-Path $fetchScript) {
+    Write-Host "==> Ensuring bundled Gemma 3 1B model in APK assets..." -ForegroundColor Cyan
+    try {
+        & $fetchScript
+    } catch {
+        if (-not (Test-Path $bundledModel)) {
+            throw "Bundled Gemma model missing. Set HF_TOKEN and run: .\scripts\fetch-bundled-gemma-model.ps1`n$($_.Exception.Message)"
+        }
+        Write-Warning "Could not refresh bundled model (using existing file): $($_.Exception.Message)"
+    }
+} elseif (-not (Test-Path $bundledModel)) {
+    throw "Bundled model missing at $bundledModel. Run .\scripts\fetch-bundled-gemma-model.ps1 first."
+}
+
 Write-Host "==> Building debug APK..." -ForegroundColor Cyan
 if (-not (Test-Path $GradleBat)) {
     throw "gradlew.bat not found at $GradleBat. Open android/ in Android Studio first."
@@ -92,11 +121,54 @@ $meta = @{
 $json = $meta | ConvertTo-Json
 [System.IO.File]::WriteAllText($MetaDest, $json, [System.Text.UTF8Encoding]::new($false))
 
+$githubRepo = if ($env:GITHUB_REPO) { $env:GITHUB_REPO } else { "piterdrori/CoffeeAi" }
+$tag = "v$version"
+$downloadUrl = "https://github.com/$githubRepo/releases/download/$tag/personal-edge-ai.apk"
+
+Write-Host ""
+Write-Host "==> Publishing APK to GitHub Releases ($githubRepo)..." -ForegroundColor Cyan
+$gh = Get-Command gh -ErrorAction SilentlyContinue
+if (-not $gh) {
+    Write-Warning "GitHub CLI (gh) not found — skipping cloud upload. Install: winget install GitHub.cli"
+} else {
+    $releaseNotes = "CoffeeAI $version — improved speech recognition, TTS crash fixes, faster chat, model install reliability."
+    $view = & gh release view $tag --repo $githubRepo 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        & gh release create $tag --repo $githubRepo --title "CoffeeAI $version" --notes $releaseNotes $ApkDest
+    } else {
+        & gh release upload $tag --repo $githubRepo $ApkDest --clobber
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "GitHub release upload failed. Local APK is still available for WiFi download."
+    } else {
+        Write-Host "  GitHub: $downloadUrl" -ForegroundColor Green
+    }
+}
+
+$appVersionPath = Join-Path $Root "backend\data\app_version.json"
+$versionCode = 1
+if (Test-Path $buildGradle) {
+    $codeMatch = Select-String -Path $buildGradle -Pattern "versionCode\s*=\s*(\d+)" | Select-Object -First 1
+    if ($codeMatch) { $versionCode = [int]$codeMatch.Matches[0].Groups[1].Value }
+}
+$appMeta = @{
+    version        = $version
+    version_code   = $versionCode
+    updated_at     = (Get-Date).ToUniversalTime().ToString("o")
+    apk_filename   = "personal-edge-ai.apk"
+    apk_size_bytes = $size
+    download_url   = $downloadUrl
+    notes          = "CoffeeAI v$version - improved STT, TTS stability, faster chat"
+}
+$appMeta | ConvertTo-Json | Set-Content -Path $appVersionPath -Encoding UTF8
+
 Write-Host ""
 Write-Host "Published successfully!" -ForegroundColor Green
 Write-Host "  APK:  $ApkDest ($([math]::Round($size / 1MB, 2)) MB)"
 Write-Host "  Meta: $MetaDest"
+Write-Host "  Cloud: $downloadUrl"
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "  1. Start backend:  docker compose up -d   (or uvicorn in backend/)"
-Write-Host "  2. On phone WiFi:  http://YOUR_PC_IP:8080  -> Download APK"
+Write-Host "  1. Deploy backend:  npx vercel --prod"
+Write-Host "  2. Download page:   https://personal-edge-ai.vercel.app"
+Write-Host "  3. Local WiFi:      docker compose up -d  ->  http://YOUR_PC_IP:8080/download/apk"

@@ -11,6 +11,13 @@ val Accent = Color(0xFF2DD4BF)
 val AccentDim = Color(0x332DD4BF)
 val Error = Color(0xFFFF6B6B)
 
+// CoffeeAI welcome palette
+val CoffeeCream = Color(0xFFFFF8F0)
+val CoffeeCreamDeep = Color(0xFFE6D2B5)
+val CoffeeBrown = Color(0xFF6F3C1E)
+val CoffeeBrownDark = Color(0xFF4A2812)
+val CoffeeText = Color(0xFF3D2314)
+
 // Legacy aliases
 val EdgeBlue = Color(0xFF1B2A4A)
 val EdgeTeal = Accent

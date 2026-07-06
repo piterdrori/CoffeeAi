@@ -24,6 +24,12 @@ android/build/
 android/app/build/
 android/local.properties
 android/hs_err_pid*.log
+android/app/src/main/assets/models/*.litertlm
+!android/app/src/main/assets/models/.gitkeep
+!android/app/src/main/assets/models/README.md
+android/app/src/main/assets/voice/stt/
+android/app/src/main/assets/voice/tts/
+!android/app/src/main/assets/voice/README.md
 *.iml
 .idea/
 *.log

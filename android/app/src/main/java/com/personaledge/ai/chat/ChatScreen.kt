@@ -1,30 +1,30 @@
 package com.personaledge.ai.chat
 
-import androidx.compose.foundation.background
+import androidx.activity.compose.BackHandler
+import android.app.Activity
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -32,41 +32,60 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.personaledge.ai.EdgeAiApplication
-import com.personaledge.ai.voice.TtsManager
-import com.personaledge.ai.ui.components.EdgeChip
-import com.personaledge.ai.ui.components.EdgeComposer
-import com.personaledge.ai.ui.components.EdgeMessage
+import com.personaledge.ai.ui.components.CoffeeAiMark
+import com.personaledge.ai.ui.components.CoffeeChatBubble
+import com.personaledge.ai.ui.components.CoffeeChatComposer
+import com.personaledge.ai.ui.components.CoffeeSwirlBackground
 import com.personaledge.ai.ui.components.EdgeOrb
 import com.personaledge.ai.ui.components.OrbState
-import com.personaledge.ai.ui.theme.Accent
-import com.personaledge.ai.ui.theme.Background
+import com.personaledge.ai.ui.theme.CoffeeBrown
+import com.personaledge.ai.ui.theme.CoffeeCream
+import com.personaledge.ai.ui.theme.CoffeeText
 import com.personaledge.ai.ui.theme.Error
-import com.personaledge.ai.ui.theme.TextMuted
-import com.personaledge.ai.ui.theme.TextPrimary
+
+private const val GREETING = "Hi! I'm CoffeeAI. What would you like to explore today?"
 
 @Composable
 fun ChatScreen(
     onVoiceMode: () -> Unit,
     onAttachImage: () -> Unit,
     modifier: Modifier = Modifier,
+    onBack: (() -> Unit)? = null,
     viewModel: ChatViewModel = viewModel(),
 ) {
     val context = LocalContext.current
     val app = context.applicationContext as EdgeAiApplication
-    val tts = remember { TtsManager(context) }
+    val tts = app.ttsManager
     val state by viewModel.uiState.collectAsState()
     val listState = rememberLazyListState()
     var autoTts by remember { mutableStateOf(true) }
     var lastSpoken by remember { mutableStateOf("") }
+    val view = LocalView.current
+
+    onBack?.let { back ->
+        BackHandler { back() }
+    }
+
+    SideEffect {
+        val window = (view.context as Activity).window
+        window.statusBarColor = CoffeeCream.toArgb()
+        window.navigationBarColor = CoffeeCream.toArgb()
+        WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = true
+    }
 
     DisposableEffect(Unit) {
-        onDispose { tts.shutdown() }
+        onDispose { tts.stop() }
     }
 
     LaunchedEffect(Unit) {
@@ -89,208 +108,141 @@ fun ChatScreen(
         }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(Background)
-            .imePadding(),
-    ) {
-        ChatHeader(
-            modelName = state.activeModelName,
-            engineStatus = state.engineStatus,
-            isEngineReady = state.isEngineReady,
-            memoryConnected = state.memoryConnected,
-            onClear = { viewModel.clearChat() },
-        )
+    Box(modifier = modifier.fillMaxSize()) {
+        CoffeeSwirlBackground(modifier = Modifier.fillMaxSize())
 
-        if (!state.isEngineReady && state.error != null) {
-            Text(
-                text = state.error ?: "",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                color = Error,
-                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-            )
-        }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding(),
+        ) {
+            LetsChatHeader(onBack = onBack)
 
-        state.error?.takeIf { state.isEngineReady }?.let {
-            Text(
-                text = it,
-                modifier = Modifier.padding(horizontal = 16.dp),
-                color = Error,
-                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-            )
-        }
-
-        Box(modifier = Modifier.weight(1f)) {
-            if (state.messages.isEmpty() && !state.isLoading) {
-                ChatEmptyState(
-                    onSuggestion = viewModel::sendSuggestion,
-                    onVoiceMode = onVoiceMode,
-                    isEngineReady = state.isEngineReady,
-                    modifier = Modifier.align(Alignment.Center),
+            if (!state.isEngineReady && state.error != null) {
+                Text(
+                    text = state.error ?: "",
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                    color = Error,
+                    fontSize = 13.sp,
                 )
-            } else {
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 12.dp),
-                    state = listState,
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    items(state.messages) { message ->
-                        EdgeMessage(
-                            role = message.role,
-                            content = message.content,
-                            isStreaming = message.isStreaming,
-                            imageUri = message.imageUri,
-                            onSpeak = if (message.role == "assistant" && message.content.isNotBlank() && !message.isStreaming) {
-                                { tts.speak(message.content) }
-                            } else {
-                                null
-                            },
+            }
+
+            LazyColumn(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                state = listState,
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (state.messages.isEmpty() && !state.isLoading) {
+                    item(key = "greeting") {
+                        CoffeeChatBubble(
+                            role = "assistant",
+                            content = GREETING,
                         )
                     }
-                    if (state.isLoading || state.orbState == OrbState.Thinking) {
-                        item {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                EdgeOrb(state = OrbState.Thinking, size = 32.dp)
-                                Text("Thinking…", color = TextMuted, style = androidx.compose.material3.MaterialTheme.typography.labelSmall)
-                            }
+                }
+
+                items(state.messages, key = { "${it.role}-${it.content.hashCode()}-${it.imageUri}" }) { message ->
+                    CoffeeChatBubble(
+                        role = message.role,
+                        content = message.content,
+                        isStreaming = message.isStreaming,
+                        imageUri = message.imageUri,
+                    )
+                }
+
+                if (state.isLoading || state.orbState == OrbState.Thinking) {
+                    item(key = "thinking") {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            EdgeOrb(state = OrbState.Thinking, size = 28.dp)
+                            Text(
+                                text = "Thinking…",
+                                color = CoffeeText.copy(alpha = 0.6f),
+                                fontSize = 13.sp,
+                            )
                         }
                     }
                 }
             }
-        }
 
-        state.pendingImageUri?.let { uri ->
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                AsyncImage(
-                    model = uri,
-                    contentDescription = null,
+            state.pendingImageUri?.let { uri ->
+                Row(
                     modifier = Modifier
-                        .size(48.dp)
-                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(8.dp)),
-                )
-                Spacer(modifier = Modifier.weight(1f))
-                IconButton(onClick = { viewModel.clearPendingImage() }) {
-                    Icon(Icons.Default.Close, contentDescription = "Remove image", tint = TextMuted)
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    AsyncImage(
+                        model = uri,
+                        contentDescription = null,
+                        modifier = Modifier.size(48.dp),
+                    )
+                    IconButton(onClick = { viewModel.clearPendingImage() }) {
+                        Text("✕", color = CoffeeText.copy(alpha = 0.5f))
+                    }
                 }
             }
-        }
 
-        EdgeComposer(
-            text = state.inputText,
-            onTextChange = viewModel::updateInput,
-            onSend = { viewModel.sendMessage() },
-            onAttach = onAttachImage,
-            onVoice = onVoiceMode,
-            enabled = !state.isLoading,
-            canSend = (state.inputText.isNotBlank() || state.pendingImagePath != null) && !state.isLoading,
-        )
+            CoffeeChatComposer(
+                text = state.inputText,
+                onTextChange = viewModel::updateInput,
+                onSend = { viewModel.sendMessage() },
+                onLetsTalk = onVoiceMode,
+                enabled = !state.isLoading,
+                canSend = (state.inputText.isNotBlank() || state.pendingImagePath != null) && !state.isLoading,
+            )
+        }
     }
 }
 
 @Composable
-private fun ChatHeader(
-    modelName: String?,
-    engineStatus: String,
-    isEngineReady: Boolean,
-    memoryConnected: Boolean,
-    onClear: () -> Unit,
-) {
+private fun LetsChatHeader(onBack: (() -> Unit)?) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(horizontal = 4.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(
-                    when {
-                        isEngineReady -> Accent
-                        memoryConnected -> TextMuted
-                        else -> Error.copy(alpha = 0.8f)
-                    },
-                ),
-        )
-        Column(modifier = Modifier.weight(1f).padding(start = 10.dp)) {
-            Text(
-                text = modelName ?: "No model selected",
-                style = androidx.compose.material3.MaterialTheme.typography.titleMedium,
-                color = TextPrimary,
-            )
-            Text(
-                text = engineStatus,
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                color = if (isEngineReady) Accent else TextMuted,
-            )
-        }
-        IconButton(onClick = onClear) {
-            Icon(Icons.Default.Close, contentDescription = "Clear chat", tint = TextMuted)
-        }
-    }
-}
-
-@Composable
-private fun ChatEmptyState(
-    onSuggestion: (String) -> Unit,
-    onVoiceMode: () -> Unit,
-    isEngineReady: Boolean,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier.padding(24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Row {
-            Text(
-                text = "Edge",
-                style = androidx.compose.material3.MaterialTheme.typography.displaySmall,
-                color = Accent,
-            )
-            Text(
-                text = "AI",
-                style = androidx.compose.material3.MaterialTheme.typography.displaySmall,
-                color = TextPrimary,
-            )
-        }
-        Text(
-            text = "Your offline assistant",
-            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
-        )
-        Spacer(modifier = Modifier.height(8.dp))
-        EdgeChip(label = "Ask anything", onClick = { onSuggestion("Hello, how can you help me today?") })
-        EdgeChip(label = "Describe an image", onClick = { onSuggestion("Describe an image I attach.") })
-        if (isEngineReady) {
-            EdgeChip(label = "Voice chat", onClick = onVoiceMode)
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Icon(Icons.Default.Mic, contentDescription = null, tint = Accent, modifier = Modifier.size(16.dp))
-                Text(
-                    text = "Or tap the mic below — replies are read aloud (TTS)",
-                    style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
+        if (onBack != null) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = CoffeeText,
                 )
             }
         } else {
+            Box(modifier = Modifier.size(48.dp))
+        }
+
+        Text(
+            text = "Let's Chat",
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.Center,
+            fontSize = 20.sp,
+            fontWeight = FontWeight.Bold,
+            color = CoffeeText,
+        )
+
+        Column(
+            modifier = Modifier.padding(end = 12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            CoffeeAiMark(modifier = Modifier.size(28.dp), color = CoffeeBrown)
             Text(
-                text = "Download a model in Settings to get started",
-                style = androidx.compose.material3.MaterialTheme.typography.labelSmall,
-                color = TextMuted,
+                text = "CoffeeAI",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = CoffeeBrown,
             )
         }
     }

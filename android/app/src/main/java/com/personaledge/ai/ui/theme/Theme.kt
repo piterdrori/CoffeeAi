@@ -23,7 +23,7 @@ private val EdgeDarkScheme = darkColorScheme(
 )
 
 @Composable
-fun PersonalEdgeAITheme(content: @Composable () -> Unit) {
+fun CoffeeAiTheme(content: @Composable () -> Unit) {
     val colorScheme = EdgeDarkScheme
     val view = LocalView.current
     if (!view.isInEditMode) {

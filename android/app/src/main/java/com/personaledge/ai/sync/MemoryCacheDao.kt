@@ -56,6 +56,9 @@ interface MemoryCacheDao {
     @Query("DELETE FROM pending_sync WHERE id IN (:ids)")
     suspend fun deletePendingSyncs(ids: List<Long>)
 
+    @Query("DELETE FROM pending_sync")
+    suspend fun clearPendingSyncs()
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun saveConfig(config: CachedConfigEntity)
 
