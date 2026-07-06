@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Personal Edge AI</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Personal Edge AI</h1>
+      <p>Offline assistant with on-device Gemma + personal memory</p>
+    </div>
+    <nav class="site-nav">
+      <a href="/" class="active">Home</a>
+      <a href="/setup">Setup</a>
+      <a href="/admin">Admin</a>
+      <span class="badge" id="healthBadge">Checking…</span>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero card full">
+      <h2>Your private AI assistant</h2>
+      <p>Chat offline with Gemma on your phone. Personality, long-term memory, and knowledge files are controlled from this backend.</p>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <div class="card-header"><h2>Download app</h2></div>
+        <div class="card-body">
+          <p id="apkStatus" style="color: var(--muted); margin-top: 0;">Checking for published APK…</p>
+          <div class="row" style="margin-top: 16px;">
+            <a href="/download/apk" class="btn" id="downloadBtn">Download APK</a>
+            <a href="/setup" class="btn secondary">Install guide</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header"><h2>Quick start</h2></div>
+        <div class="card-body" style="padding: 0;">
+          <ol class="steps">
+            <li><strong>Install the app</strong><span>Download APK here or install via USB + Android Studio.</span></li>
+            <li><strong>Connect to backend</strong><span>In app Settings, set your PC IP and API key below.</span></li>
+            <li><strong>Download a model</strong><span>Open Models tab, add HF token, download Gemma 3 1B or 4 E2B.</span></li>
+          </ol>
+        </div>
+      </section>
+    </div>
+
+    <section class="card full">
+      <div class="card-header"><h2>Phone connection</h2></div>
+      <div class="card-body">
+        <label>Backend URL — physical phone (same Wi‑Fi)</label>
+        <p class="mono" id="phoneUrl">Loading…</p>
+        <label style="margin-top: 16px;">Backend URL — Android emulator</label>
+        <p class="mono" id="emulatorUrl">http://10.0.2.2:8080</p>
+        <label style="margin-top: 16px;">API key (app Settings → Backend)</label>
+        <p class="mono" id="apiKeyHint">Loading…</p>
+        <p style="color: var(--muted); font-size: 0.875rem; margin-bottom: 0;">
+          Phone and PC must be on the same Wi‑Fi. Emulator uses <code>10.0.2.2</code> to reach this PC.
+        </p>
+      </div>
+    </section>
+
+    <section class="card full">
+      <div class="card-header"><h2>Admin dashboard</h2></div>
+      <div class="card-body">
+        <p style="margin-top: 0; color: var(--muted);">Edit personality, upload PDFs/notes, and browse stored memories.</p>
+        <a href="/admin" class="btn">Open admin panel</a>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const healthBadge = document.getElementById("healthBadge");
+    const apkStatus = document.getElementById("apkStatus");
+    const downloadBtn = document.getElementById("downloadBtn");
+    const phoneUrl = document.getElementById("phoneUrl");
+    const emulatorUrl = document.getElementById("emulatorUrl");
+    const apiKeyHint = document.getElementById("apiKeyHint");
+
+    async function loadConnectionHints() {
+      try {
+        const hints = await fetch("/v1/connection-hints").then((r) => r.json());
+        phoneUrl.textContent = hints.phone_url || "Run ipconfig — use your Wi‑Fi IPv4";
+        emulatorUrl.textContent = hints.emulator_url;
+        apiKeyHint.textContent = hints.api_key_hint;
+      } catch {
+        phoneUrl.textContent = "http://YOUR_PC_IP:8080";
+        apiKeyHint.textContent = "dev-api-key-change-me";
+      }
+    }
+
+    async function loadHealth() {
+      try {
+        const data = await fetch("/health").then((r) => r.json());
+        healthBadge.textContent = data.status === "ok" ? "Backend online" : "Unknown";
+        healthBadge.className = "badge ok";
+      } catch {
+        healthBadge.textContent = "Backend offline";
+        healthBadge.className = "badge err";
+      }
+    }
+
+    async function loadApkInfo() {
+      try {
+        const info = await fetch("/download/apk/info").then((r) => r.json());
+        if (info.available) {
+          const mb = (info.size_bytes / (1024 * 1024)).toFixed(1);
+          apkStatus.textContent = `Version ${info.version || "1.0"} · ${mb} MB · updated ${new Date(info.updated_at).toLocaleString()}`;
+          downloadBtn.classList.remove("disabled");
+        } else {
+          apkStatus.textContent = info.message || "No APK published yet. Run scripts\\publish-apk.ps1 on your PC.";
+          downloadBtn.classList.add("disabled");
+        }
+      } catch {
+        apkStatus.textContent = "Could not check APK status.";
+        downloadBtn.classList.add("disabled");
+      }
+    }
+
+    loadHealth();
+    loadApkInfo();
+    loadConnectionHints();
+  </script>
+</body>
+</html>

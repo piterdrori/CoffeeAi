@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Backend data
+backend/data/chroma/
+backend/data/files/*
+backend/data/cache/
+!backend/data/.gitkeep
+backend/data/releases/*.apk
+backend/data/releases/release.json
+!backend/data/releases/.gitkeep
+!backend/data/releases/README.md
+
+# Vercel
+.vercel
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/hs_err_pid*.log
+*.iml
+.idea/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

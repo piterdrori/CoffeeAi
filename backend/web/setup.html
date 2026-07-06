@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Personal Edge AI — Setup Guide</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Setup Guide</h1>
+      <p>Install the app and connect your phone</p>
+    </div>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/setup" class="active">Setup</a>
+      <a href="/admin">Admin</a>
+    </nav>
+  </header>
+
+  <main class="narrow">
+    <section class="card full">
+      <div class="card-header"><h2>Method A — USB + Android Studio</h2></div>
+      <div class="card-body">
+        <ol class="steps">
+          <li><strong>Install Android Studio</strong><span>Download from developer.android.com. Include Android SDK 34 and JDK 17.</span></li>
+          <li><strong>Enable USB debugging</strong><span>On phone: Settings → About → tap Build number 7 times → Developer options → USB debugging ON.</span></li>
+          <li><strong>Open the project</strong><span>In Android Studio: Open folder <code>android/</code> from this repo.</span></li>
+          <li><strong>Connect phone via USB</strong><span>Accept the debugging prompt on your phone.</span></li>
+          <li><strong>Click Run</strong><span>Green play button in Android Studio. App installs directly — no APK file needed.</span></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="card full">
+      <div class="card-header"><h2>Method B — WiFi download</h2></div>
+      <div class="card-body">
+        <ol class="steps">
+          <li><strong>Build & publish APK on PC</strong><span>Run <code>scripts\publish-apk.ps1</code> from the project root (requires JDK + Android SDK).</span></li>
+          <li><strong>Start backend</strong><span><code>docker compose up -d</code> or <code>uvicorn main:app --port 8080</code> in <code>backend/</code>.</span></li>
+          <li><strong>Find your PC IP</strong><span>Run <code>ipconfig</code> in PowerShell. Use the IPv4 address (e.g. 192.168.1.42).</span></li>
+          <li><strong>Download on phone</strong><span>Same WiFi → open <code>http://YOUR_PC_IP:8080</code> → Download APK.</span></li>
+          <li><strong>Allow unknown apps</strong><span>When prompted, allow your browser to install apps.</span></li>
+          <li><strong>Open app → Settings</strong><span>Set Local backend URL to <code>http://YOUR_PC_IP:8080</code> and API key from <code>backend/.env</code>.</span></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="card full">
+      <div class="card-header"><h2>Method C — Android emulator (PC testing)</h2></div>
+      <div class="card-body">
+        <ol class="steps">
+          <li><strong>Start emulator</strong><span>Android Studio → Device Manager → run a virtual device.</span></li>
+          <li><strong>Run the app</strong><span>Open <code>android/</code> in Android Studio → green Run button.</span></li>
+          <li><strong>Backend URL in app</strong><span>Use <code>http://10.0.2.2:8080</code> (not localhost, not your Wi‑Fi IP).</span></li>
+          <li><strong>API key</strong><span>Same as <code>API_KEY</code> in <code>backend/.env</code> — shown on the <a href="/" style="color: var(--accent);">home page</a>.</span></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="card full">
+      <div class="card-header"><h2>First-run checklist</h2></div>
+      <div class="card-body" style="padding: 0;">
+        <ol class="steps">
+          <li><strong>Set API key in app Settings</strong><span>Must match <code>API_KEY</code> in backend <code>.env</code>.</span></li>
+          <li><strong>Add Hugging Face token</strong><span>Models tab → required for Gemma 3 1B (gated). Accept license at huggingface.co first.</span></li>
+          <li><strong>Download a model</strong><span>Gemma 3 1B (~620 MB) for text. Gemma 4 E2B (~2.6 GB) for images.</span></li>
+          <li><strong>Configure personality</strong><span>On PC open <a href="/admin" style="color: var(--accent);">/admin</a> → set system prompt and upload knowledge files.</span></li>
+          <li><strong>Sync memory</strong><span>In app Settings → Sync memory now, or chat online to prefetch automatically.</span></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="card full">
+      <div class="card-header"><h2>Windows firewall</h2></div>
+      <div class="card-body">
+        <p style="margin-top: 0; color: var(--muted);">If your phone cannot reach the backend, allow port 8080:</p>
+        <p class="mono">netsh advfirewall firewall add rule name="Personal Edge AI" dir=in action=allow protocol=TCP localport=8080</p>
+      </div>
+    </section>
+
+    <div class="row">
+      <a href="/" class="btn secondary">← Back to home</a>
+      <a href="/download/apk" class="btn">Download APK</a>
+    </div>
+  </main>
+</body>
+</html>

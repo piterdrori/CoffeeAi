@@ -1,0 +1,8 @@
+fastapi
+mangum
+python-multipart
+chromadb
+pydantic-settings
+aiofiles
+httpx
+pypdf

@@ -1,0 +1,27 @@
+package com.personaledge.ai.inference
+
+data class MemoryContext(
+    val systemPrompt: String = "You are a helpful personal assistant.",
+    val personalityRules: String = "",
+    val memoryChunks: List<String> = emptyList(),
+)
+
+data class ChatTurn(
+    val role: String,
+    val content: String,
+)
+
+object PromptBuilder {
+    fun buildSystemInstruction(context: MemoryContext): String {
+        val parts = buildList {
+            add(context.systemPrompt.trim())
+            if (context.personalityRules.isNotBlank()) {
+                add("Personality and tone rules:\n${context.personalityRules.trim()}")
+            }
+            if (context.memoryChunks.isNotEmpty()) {
+                add("Relevant memory:\n${context.memoryChunks.joinToString("\n") { "- $it" }}")
+            }
+        }
+        return parts.joinToString("\n\n")
+    }
+}

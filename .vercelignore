@@ -1,0 +1,7 @@
+android/
+backend/.venv/
+backend/data/chroma/
+backend/data/cache/
+backend/data/files/
+backend/data/releases/*.apk
+*.apk
