@@ -53,12 +53,6 @@ object SherpaVoiceConfig {
     const val BARGE_IN_THINKING_HOLD_MS = 300L
     /** Barge-in while thinking (no TTS) — normal sensitivity. */
     const val BARGE_IN_THINKING_RMS = 0.012f
-    /**
-     * Grace period after the AI starts speaking before mic barge-in arms.
-     * Prevents the first words of TTS (and the tail of the user's utterance) from
-     * self-cancelling the reply.
-     */
-    const val SPEAKING_BARGE_IN_GRACE_MS = 700L
     /** Minimum RMS that can count as user speech over TTS (near-field voice). */
     const val BARGE_IN_USER_MIN_RMS = 0.018f
     /** Measure speaker bleed at TTS start before enabling interrupt detection. */

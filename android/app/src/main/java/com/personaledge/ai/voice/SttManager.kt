@@ -286,11 +286,14 @@ class SttManager(context: Context) {
         srLevelWarmupUntilMs = System.currentTimeMillis() + 600L
     }
 
-    /** Speaker→mic bleed on emulator makes voice barge-in unreliable without headphones. */
+    /**
+     * Speaker→mic bleed makes voice barge-in unreliable on a loudspeaker: the phone's mic
+     * picks up the AI's own voice and cancels the reply mid-sentence. Only allow listening
+     * while the AI speaks when a headset is connected; otherwise the user uses the Stop button.
+     */
     fun isVoiceBargeInAvailable(): Boolean = isDuplexInterruptSafe()
 
     private fun isDuplexInterruptSafe(): Boolean {
-        if (!SherpaVoiceConfig.isX86Device) return true
         @Suppress("DEPRECATION")
         if (audioManager.isWiredHeadsetOn || audioManager.isBluetoothA2dpOn) return true
         val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)

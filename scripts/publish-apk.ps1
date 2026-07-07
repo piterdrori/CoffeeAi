@@ -143,7 +143,7 @@ $gh = Get-Command gh -ErrorAction SilentlyContinue
 if (-not $gh) {
     Write-Warning "GitHub CLI (gh) not found — skipping cloud upload. Install: winget install GitHub.cli"
 } else {
-    $releaseNotes = "CoffeeAI $version — natural Piper neural voice on phone, plain human-like replies (no markdown/asterisks), and less repetitive phrasing."
+    $releaseNotes = "CoffeeAI $version — mic stays off while the AI thinks/speaks (no self-interruption), all LLM prompts moved to the backend, and removed unused Ollama fields."
     $view = & gh release view $tag --repo $githubRepo 2>&1
     if ($LASTEXITCODE -ne 0) {
         & gh release create $tag --repo $githubRepo --title "CoffeeAI $version" --notes $releaseNotes $ApkDest
@@ -170,7 +170,7 @@ $appMeta = @{
     apk_filename   = "personal-edge-ai.apk"
     apk_size_bytes = $size
     download_url   = $downloadUrl
-    notes          = "CoffeeAI v$version - natural Piper voice, plain human-like replies, cleaner text"
+    notes          = "CoffeeAI v$version - no self-interruption, backend-only prompts, cleanup"
 }
 $appMeta | ConvertTo-Json | Set-Content -Path $appVersionPath -Encoding UTF8
 

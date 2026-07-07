@@ -63,7 +63,6 @@ import com.personaledge.ai.ui.theme.CoffeeBrownDark
 import com.personaledge.ai.ui.theme.CoffeeText
 import com.personaledge.ai.ui.theme.Error
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private enum class VoiceTalkPhase {
@@ -283,21 +282,12 @@ fun VoiceModeScreen(
         )
         // #endregion
         stt.setTtsPlaybackActive(isSpeaking)
+        // Mic is ON only while Listening. During Thinking and Speaking the mic stays OFF so the
+        // AI can never interrupt itself; the user interrupts with the Stop AI button, and the
+        // mic turns back on automatically once the AI finishes (or when Stop AI is tapped).
         when (phase) {
-            VoiceTalkPhase.Thinking ->
-                // No mic barge-in while the AI is thinking (it makes no sound to interrupt).
+            VoiceTalkPhase.Thinking, VoiceTalkPhase.Speaking ->
                 stt.setBargeInEnabled(enabled = false)
-            VoiceTalkPhase.Speaking ->
-                if (isSpeaking) {
-                    // Only arm barge-in once TTS is actually playing, and after a short
-                    // grace period so the opening words don't self-trigger via speaker bleed.
-                    delay(SherpaVoiceConfig.SPEAKING_BARGE_IN_GRACE_MS)
-                    if (phase == VoiceTalkPhase.Speaking && sessionActive) {
-                        stt.setBargeInEnabled(enabled = true, speaking = true)
-                    }
-                } else {
-                    stt.setBargeInEnabled(enabled = false)
-                }
             else -> Unit
         }
     }
