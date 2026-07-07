@@ -172,7 +172,7 @@ fun ChatScreen(
                     }
                 }
 
-                items(state.messages, key = { "${it.role}-${it.content.hashCode()}-${it.imageUri}" }) { message ->
+                items(state.messages, key = { it.id }) { message ->
                     CoffeeChatBubble(
                         role = message.role,
                         content = message.content,
@@ -181,7 +181,9 @@ fun ChatScreen(
                     )
                 }
 
-                if (state.isLoading || state.orbState == OrbState.Thinking) {
+                if ((state.isLoading || state.orbState == OrbState.Thinking) &&
+                    state.messages.lastOrNull()?.isStreaming != true
+                ) {
                     item(key = "thinking") {
                         Row(
                             modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),

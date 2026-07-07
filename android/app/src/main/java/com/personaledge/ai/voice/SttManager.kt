@@ -316,19 +316,17 @@ class SttManager(context: Context) {
                 _isModelLoading.value = true
                 _error.value = null
                 try {
-                    if (SherpaVoiceConfig.useOnlineSttOnEmulator) {
+                    if (SherpaVoiceConfig.useOnlineStt) {
                         val stt = EmulatorSpeechStt(appContext)
-                        emulatorStt = stt
-                        if (!stt.isAvailable()) {
-                            _error.value =
-                                "Speech recognition unavailable. Use a Google Play emulator image with internet."
+                        if (stt.isAvailable()) {
+                            emulatorStt = stt
+                            _backendLabel.value = SherpaVoiceConfig.ONLINE_STT_LABEL
+                            _isModelReady.value = true
+                            Log.i(TAG, "Google Speech STT ready")
+                            onReady?.invoke()
                             return@withLock
                         }
-                        _backendLabel.value = SherpaVoiceConfig.EMULATOR_STT_LABEL
-                        _isModelReady.value = true
-                        Log.i(TAG, "Emulator online STT ready")
-                        onReady?.invoke()
-                        return@withLock
+                        Log.w(TAG, "Google Speech unavailable — falling back to Whisper")
                     }
                     if (!BundledAssetCopier.hasAssetFile(appContext.assets, WhisperVoiceConfig.MODEL_ASSET)) {
                         _error.value =

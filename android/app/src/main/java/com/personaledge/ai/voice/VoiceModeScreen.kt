@@ -106,7 +106,7 @@ fun VoiceModeScreen(
         )
     }
     val micReadyForStart = hasMicPermission &&
-        (SherpaVoiceConfig.isPhysicalDevice || micConnected || SherpaVoiceConfig.useOnlineSttOnEmulator)
+        (SherpaVoiceConfig.isPhysicalDevice || micConnected || SherpaVoiceConfig.useOnlineStt)
 
     fun resumeListening() {
         phase = VoiceTalkPhase.Listening
@@ -444,7 +444,7 @@ fun VoiceModeScreen(
             } else if (hasMicPermission && !sessionActive) {
                 Text(
                     text = if (SherpaVoiceConfig.isPhysicalDevice) {
-                        "Tap Start, then speak — your phone mic and speaker are used offline."
+                        "Tap Start, then speak — uses Google Speech for fast recognition."
                     } else {
                         "Microphone working — tap Start when ready"
                     },

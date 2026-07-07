@@ -33,6 +33,7 @@ data class UiMessage(
     val content: String,
     val isStreaming: Boolean = false,
     val imageUri: String? = null,
+    val id: String = UUID.randomUUID().toString(),
 )
 
 data class ChatUiState(
@@ -61,6 +62,59 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var sendJob: Job? = null
     private var machineCommandJob: Job? = null
     private var voiceSessionActive = false
+
+    private companion object {
+        const val STREAM_UI_THROTTLE_MS = 80L
+    }
+
+    private fun appendStreamingToken(
+        streamingIndex: Int,
+        responseBuilder: StringBuilder,
+        token: String,
+        lastUiUpdateMs: Long,
+        includeOrb: Boolean = true,
+    ): Long {
+        responseBuilder.append(token)
+        val now = System.currentTimeMillis()
+        if (now - lastUiUpdateMs < STREAM_UI_THROTTLE_MS) {
+            return lastUiUpdateMs
+        }
+        _uiState.update { state ->
+            val updated = state.messages.toMutableList()
+            if (streamingIndex < updated.size) {
+                updated[streamingIndex] = updated[streamingIndex].copy(
+                    content = responseBuilder.toString(),
+                    isStreaming = true,
+                )
+            }
+            state.copy(
+                messages = updated,
+                orbState = if (includeOrb) OrbState.Thinking else state.orbState,
+            )
+        }
+        return now
+    }
+
+    private fun finalizeStreamingMessage(
+        streamingIndex: Int,
+        finalResponse: String,
+        clearLoading: Boolean = true,
+    ) {
+        _uiState.update { state ->
+            val updated = state.messages.toMutableList()
+            if (streamingIndex < updated.size) {
+                updated[streamingIndex] = updated[streamingIndex].copy(
+                    content = finalResponse,
+                    isStreaming = false,
+                )
+            }
+            state.copy(
+                messages = updated,
+                isLoading = if (clearLoading) false else state.isLoading,
+                orbState = if (clearLoading) OrbState.Idle else state.orbState,
+            )
+        }
+    }
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -398,35 +452,31 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 val streamingIndex = _uiState.value.messages.size
+                val assistantId = UUID.randomUUID().toString()
                 _uiState.update {
-                    it.copy(messages = it.messages + UiMessage("assistant", "", isStreaming = true))
+                    it.copy(
+                        messages = it.messages + UiMessage(
+                            id = assistantId,
+                            role = "assistant",
+                            content = "",
+                            isStreaming = true,
+                        ),
+                    )
                 }
 
                 val responseBuilder = StringBuilder()
+                var lastUiUpdateMs = 0L
                 engine.sendMessageStreaming(text).collect { token ->
-                    responseBuilder.append(token)
-                    _uiState.update { state ->
-                        val updated = state.messages.toMutableList()
-                        if (streamingIndex < updated.size) {
-                            updated[streamingIndex] = UiMessage(
-                                "assistant",
-                                responseBuilder.toString(),
-                                isStreaming = true,
-                            )
-                        }
-                        state.copy(messages = updated, orbState = OrbState.Thinking)
-                    }
+                    lastUiUpdateMs = appendStreamingToken(
+                        streamingIndex,
+                        responseBuilder,
+                        token,
+                        lastUiUpdateMs,
+                    )
                 }
 
-                val finalResponse = responseBuilder.toString()
-                _uiState.update { state ->
-                    val updated = state.messages.toMutableList()
-                    if (streamingIndex < updated.size) {
-                        updated[streamingIndex] = UiMessage("assistant", finalResponse)
-                    }
-                    state.copy(messages = updated, isLoading = false, orbState = OrbState.Idle)
-                }
-                viewModelScope.launch { syncClient.syncTurn(text, finalResponse) }
+                finalizeStreamingMessage(streamingIndex, responseBuilder.toString())
+                viewModelScope.launch { syncClient.syncTurn(text, responseBuilder.toString()) }
                 persistCurrentSession()
             } catch (_: CancellationException) {
                 // barge-in or stop
@@ -493,40 +543,36 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 engine.startConversation(memory, history)
 
                 val streamingIndex = _uiState.value.messages.size
+                val assistantId = UUID.randomUUID().toString()
                 _uiState.update {
-                    it.copy(messages = it.messages + UiMessage("assistant", "", isStreaming = true))
+                    it.copy(
+                        messages = it.messages + UiMessage(
+                            id = assistantId,
+                            role = "assistant",
+                            content = "",
+                            isStreaming = true,
+                        ),
+                    )
                 }
 
                 val responseBuilder = StringBuilder()
+                var lastUiUpdateMs = 0L
                 val flow = if (imagePath != null) {
                     engine.sendMultimodalMessage(prompt, imagePath)
                 } else {
                     engine.sendMessageStreaming(prompt)
                 }
                 flow.collect { token ->
-                    responseBuilder.append(token)
-                    _uiState.update { state ->
-                        val updated = state.messages.toMutableList()
-                        if (streamingIndex < updated.size) {
-                            updated[streamingIndex] = UiMessage(
-                                "assistant",
-                                responseBuilder.toString(),
-                                isStreaming = true,
-                            )
-                        }
-                        state.copy(messages = updated, orbState = OrbState.Thinking)
-                    }
+                    lastUiUpdateMs = appendStreamingToken(
+                        streamingIndex,
+                        responseBuilder,
+                        token,
+                        lastUiUpdateMs,
+                    )
                 }
 
-                val finalResponse = responseBuilder.toString()
-                _uiState.update { state ->
-                    val updated = state.messages.toMutableList()
-                    if (streamingIndex < updated.size) {
-                        updated[streamingIndex] = UiMessage("assistant", finalResponse)
-                    }
-                    state.copy(messages = updated, isLoading = false, orbState = OrbState.Idle)
-                }
-                viewModelScope.launch { syncClient.syncTurn(prompt, finalResponse) }
+                finalizeStreamingMessage(streamingIndex, responseBuilder.toString())
+                viewModelScope.launch { syncClient.syncTurn(prompt, responseBuilder.toString()) }
                 persistCurrentSession()
             } catch (_: CancellationException) {
                 // barge-in or stop — state already handled by cancelResponse()
@@ -588,39 +634,40 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 val streamingIndex = _uiState.value.messages.size
+                val assistantId = UUID.randomUUID().toString()
                 _uiState.update {
-                    it.copy(messages = it.messages + UiMessage("assistant", "", isStreaming = true))
+                    it.copy(
+                        messages = it.messages + UiMessage(
+                            id = assistantId,
+                            role = "assistant",
+                            content = "",
+                            isStreaming = true,
+                        ),
+                    )
                 }
 
                 val responseBuilder = StringBuilder()
                 if (engine.isLoaded) {
+                    var lastUiUpdateMs = 0L
                     engine.sendMessageStreaming(prompt).collect { token ->
-                        responseBuilder.append(token)
-                        _uiState.update { state ->
-                            val updated = state.messages.toMutableList()
-                            if (streamingIndex < updated.size) {
-                                updated[streamingIndex] = UiMessage(
-                                    "assistant",
-                                    responseBuilder.toString(),
-                                    isStreaming = true,
-                                )
-                            }
-                            state.copy(messages = updated)
-                        }
+                        lastUiUpdateMs = appendStreamingToken(
+                            streamingIndex,
+                            responseBuilder,
+                            token,
+                            lastUiUpdateMs,
+                            includeOrb = false,
+                        )
                     }
                 } else {
                     responseBuilder.append("CoffeeAI is starting up. Your command has been queued.")
                 }
 
-                val finalResponse = responseBuilder.toString()
-                _uiState.update { state ->
-                    val updated = state.messages.toMutableList()
-                    if (streamingIndex < updated.size) {
-                        updated[streamingIndex] = UiMessage("assistant", finalResponse)
-                    }
-                    state.copy(messages = updated, isLoading = false)
-                }
-                viewModelScope.launch { syncClient.syncTurn(prompt, finalResponse) }
+                finalizeStreamingMessage(
+                    streamingIndex,
+                    responseBuilder.toString(),
+                    clearLoading = true,
+                )
+                viewModelScope.launch { syncClient.syncTurn(prompt, responseBuilder.toString()) }
                 persistCurrentSession()
                 _brewState.value = BrewState(BrewStatus.Ready, displayName)
             } catch (_: CancellationException) {

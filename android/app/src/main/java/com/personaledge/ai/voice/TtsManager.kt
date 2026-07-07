@@ -62,7 +62,7 @@ class TtsManager(context: Context) {
 
     init {
         scope.launch {
-            if (SherpaVoiceConfig.useSystemTtsOnEmulator) {
+            if (SherpaVoiceConfig.useSystemTts) {
                 initSystemTts()
             } else {
                 initEngine()
@@ -78,8 +78,8 @@ class TtsManager(context: Context) {
                 return
             }
             emulatorTts = engine
-            _voiceLabel.value = if (SherpaVoiceConfig.useSystemTtsOnEmulator) {
-                SherpaVoiceConfig.EMULATOR_TTS_LABEL
+            _voiceLabel.value = if (SherpaVoiceConfig.useSystemTts) {
+                SherpaVoiceConfig.SYSTEM_TTS_LABEL
             } else {
                 "Android TTS (device)"
             }
@@ -215,7 +215,7 @@ class TtsManager(context: Context) {
                 data = mapOf("chars" to cleaned.length, "emulator" to SherpaVoiceConfig.useSystemTtsOnEmulator),
             )
             // #endregion
-            if (SherpaVoiceConfig.useSystemTtsOnEmulator || emulatorTts != null) {
+            if (SherpaVoiceConfig.useSystemTts || emulatorTts != null) {
                 speakWithSystemTts(cleaned)
                 return@launch
             }

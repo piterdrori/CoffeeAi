@@ -74,12 +74,18 @@ object SherpaVoiceConfig {
     const val TTS_BASELINE_FALL_RATE = 0.14f
     const val TTS_BASELINE_RISE_RATE = 0.02f
 
-    /** Whisper on emulator is too slow; use online Google STT for dev instead. */
-    val useOnlineSttOnEmulator: Boolean = isEmulator
-    /** Piper TTS often silent on emulator; use Android system TTS for audible PC output. */
-    val useSystemTtsOnEmulator: Boolean = isEmulator
-    const val EMULATOR_STT_LABEL = "Google Speech (emulator — online)"
-    const val EMULATOR_TTS_LABEL = "Android TTS (emulator)"
+    /** Google Speech — fast and accurate on real phones and emulators (needs network). */
+    val useOnlineStt: Boolean = isEmulator || isPhysicalDevice
+    /** @deprecated Use [useOnlineStt] */
+    val useOnlineSttOnEmulator: Boolean get() = useOnlineStt
+    /** Android system TTS — low latency on real phones and emulators. */
+    val useSystemTts: Boolean = isEmulator || isPhysicalDevice
+    /** @deprecated Use [useSystemTts] */
+    val useSystemTtsOnEmulator: Boolean get() = useSystemTts
+    const val ONLINE_STT_LABEL = "Google Speech"
+    const val SYSTEM_TTS_LABEL = "Android TTS"
+    const val EMULATOR_STT_LABEL = ONLINE_STT_LABEL
+    const val EMULATOR_TTS_LABEL = SYSTEM_TTS_LABEL
 
     val MAX_UTTERANCE_MS: Long = if (isX86Device) 2_000L else 4_000L
     val MAX_UTTERANCE_SAMPLES: Int = if (isX86Device) SAMPLE_RATE * 2 else SAMPLE_RATE * 4
