@@ -13,8 +13,8 @@ android {
         applicationId = "com.personaledge.ai"
         minSdk = 31
         targetSdk = 34
-        versionCode = 7
-        versionName = "1.4.2"
+        versionCode = 8
+        versionName = "1.4.3"
 
         buildConfigField("String", "CLOUD_URL", "\"https://personal-edge-ai.vercel.app\"")
         buildConfigField("String", "CLOUD_API_KEY", "\"dev-api-key-change-me\"")

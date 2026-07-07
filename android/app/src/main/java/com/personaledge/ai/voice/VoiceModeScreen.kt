@@ -63,6 +63,7 @@ import com.personaledge.ai.ui.theme.CoffeeBrownDark
 import com.personaledge.ai.ui.theme.CoffeeText
 import com.personaledge.ai.ui.theme.Error
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 private enum class VoiceTalkPhase {
@@ -177,7 +178,9 @@ fun VoiceModeScreen(
                 spokenChars = 0
                 phase = VoiceTalkPhase.Thinking
                 stt.setAcceptingUtterance(false)
-                stt.setBargeInEnabled(enabled = true, speaking = false)
+                // AI is silent while thinking — don't arm mic barge-in here, or the tail
+                // of the user's speech / room noise cancels the reply before it exists.
+                stt.setBargeInEnabled(enabled = false)
                 chatViewModel.updateInput(text)
                 chatViewModel.sendVoiceMessage()
             }
@@ -282,9 +285,19 @@ fun VoiceModeScreen(
         stt.setTtsPlaybackActive(isSpeaking)
         when (phase) {
             VoiceTalkPhase.Thinking ->
-                stt.setBargeInEnabled(enabled = true, speaking = false)
+                // No mic barge-in while the AI is thinking (it makes no sound to interrupt).
+                stt.setBargeInEnabled(enabled = false)
             VoiceTalkPhase.Speaking ->
-                stt.setBargeInEnabled(enabled = true, speaking = true)
+                if (isSpeaking) {
+                    // Only arm barge-in once TTS is actually playing, and after a short
+                    // grace period so the opening words don't self-trigger via speaker bleed.
+                    delay(SherpaVoiceConfig.SPEAKING_BARGE_IN_GRACE_MS)
+                    if (phase == VoiceTalkPhase.Speaking && sessionActive) {
+                        stt.setBargeInEnabled(enabled = true, speaking = true)
+                    }
+                } else {
+                    stt.setBargeInEnabled(enabled = false)
+                }
             else -> Unit
         }
     }
@@ -336,14 +349,14 @@ fun VoiceModeScreen(
         phase == VoiceTalkPhase.Thinking && !chatState.isEngineReady ->
             "Loading CoffeeAI model — first launch can take a minute"
         phase == VoiceTalkPhase.Thinking || chatState.isLoading ->
-            "Speak anytime to interrupt"
+            "Preparing your answer…"
         phase == VoiceTalkPhase.Listening && isTranscribing ->
             if (transcribeSeconds > 0) {
-                "Whisper is processing (${transcribeSeconds}s)…"
-            } else if (SherpaVoiceConfig.useOnlineSttOnEmulator) {
-                "Online speech recognition (emulator — needs internet)"
+                "Processing (${transcribeSeconds}s)…"
+            } else if (SherpaVoiceConfig.useOnlineStt) {
+                "Recognizing your speech…"
             } else {
-                "Whisper is processing your speech"
+                "Processing your speech"
             }
         phase == VoiceTalkPhase.Listening ->
             "Pause 2–3 seconds when you're done"
