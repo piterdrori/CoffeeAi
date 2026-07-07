@@ -20,11 +20,15 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     private val store = app.chatSessionStore
     private val seededKey = booleanPreferencesKey("sample_chats_seeded")
 
-    val sessions: StateFlow<List<ChatSessionEntity>> = store.sessions
+    val sessions: StateFlow<List<ChatSessionEntity>> = store.sessionsWithMessages
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     fun deleteSession(id: String) {
         viewModelScope.launch { store.deleteSession(id) }
+    }
+
+    fun cleanupEmptySessions() {
+        viewModelScope.launch { store.deleteSessionsWithoutMessages() }
     }
 
     suspend fun ensureSampleChats() {

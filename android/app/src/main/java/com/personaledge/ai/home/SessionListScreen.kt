@@ -10,12 +10,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -28,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -40,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -61,6 +65,7 @@ internal val sessionAccentGradients = listOf(
 fun SessionListScreen(
     sessions: List<ChatSessionEntity>,
     onOpenChat: (String) -> Unit,
+    onNewChat: (() -> Unit)? = null,
     onRemoveChat: ((String) -> Unit)? = null,
     onToggleFavorite: ((String, Boolean) -> Unit)? = null,
     showSearch: Boolean = false,
@@ -90,13 +95,41 @@ fun SessionListScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 12.dp),
-                placeholder = { Text("Search chats") },
+                label = { Text("Search chats", color = CoffeeText) },
+                placeholder = { Text("Search by title or preview", color = CoffeeText.copy(alpha = 0.55f)) },
                 leadingIcon = {
                     Icon(Icons.Default.Search, contentDescription = null, tint = CoffeeBrown)
                 },
+                textStyle = TextStyle(color = CoffeeText, fontSize = 15.sp),
+                colors = coffeeFieldColors(),
                 shape = RoundedCornerShape(24.dp),
                 singleLine = true,
             )
+            HorizontalDivider(color = Color(0xFFE8DDD0), thickness = 1.dp)
+        }
+
+        if (onNewChat != null) {
+            TextButton(
+                onClick = onNewChat,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 4.dp)
+                    .height(48.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Add,
+                    contentDescription = null,
+                    tint = CoffeeBrown,
+                    modifier = Modifier.size(20.dp),
+                )
+                Text(
+                    text = "New Chat",
+                    color = CoffeeBrown,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(start = 8.dp),
+                )
+            }
             HorizontalDivider(color = Color(0xFFE8DDD0), thickness = 1.dp)
         }
 
@@ -242,18 +275,24 @@ internal fun SessionRow(
 @Composable
 fun ChatsSearchScreen(
     onOpenChat: (String) -> Unit,
+    onNewChat: () -> Unit,
+    onToggleFavorite: ((String, Boolean) -> Unit)? = null,
     modifier: Modifier = Modifier,
     viewModel: HomeViewModel = viewModel(),
 ) {
     val sessions by viewModel.sessions.collectAsState()
     LaunchedEffect(Unit) {
-        viewModel.ensureSampleChats()
+        viewModel.cleanupEmptySessions()
     }
     SessionListScreen(
         sessions = sessions,
         onOpenChat = onOpenChat,
+        onNewChat = onNewChat,
         onRemoveChat = { viewModel.deleteSession(it) },
+        onToggleFavorite = onToggleFavorite,
         showSearch = true,
+        emptyTitle = "No chats yet",
+        emptySubtitle = "Tap New Chat to start a conversation",
         modifier = modifier,
     )
 }

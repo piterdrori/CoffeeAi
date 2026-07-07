@@ -23,11 +23,15 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,9 +40,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.personaledge.ai.coffee.CoffeeRecipeEntity
+import com.personaledge.ai.coffee.QuickActionEntity
+import com.personaledge.ai.coffee.QuickActionKind
 import com.personaledge.ai.ui.components.CoffeeAiMark
 import com.personaledge.ai.ui.components.CoffeeSwirlBackground
 import com.personaledge.ai.ui.theme.CoffeeBrown
@@ -47,31 +56,24 @@ import com.personaledge.ai.ui.theme.CoffeeCream
 import com.personaledge.ai.ui.theme.CoffeeText
 import java.util.Calendar
 
-private data class QuickAction(
-    val label: String,
-    val prompt: String,
-    val highlighted: Boolean = false,
-)
-
-private val quickActions = listOf(
-    QuickAction("Find Recipes", "Can you suggest a strong coffee recipe?", highlighted = true),
-    QuickAction("Brewing Tips", "What are your best brewing tips for great coffee?"),
-    QuickAction("Coffee Facts", "Tell me an interesting coffee fact."),
-    QuickAction("Morning Brew", "Help me plan my morning coffee routine."),
-    QuickAction("Espresso Guide", "How do I pull a perfect espresso shot?"),
-    QuickAction("Shop Picks", "Recommend cozy coffee shops nearby."),
-)
-
 @Composable
 fun HomeScreen(
     onLetsChat: () -> Unit,
     onLetsTalk: () -> Unit,
-    onQuickAction: (String) -> Unit,
+    onBrewRecipe: (CoffeeRecipeEntity) -> Unit,
+    onMachineAction: (QuickActionEntity) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenFavoriteBeverages: () -> Unit,
+    onOpenManageMachine: () -> Unit,
     modifier: Modifier = Modifier,
+    quickActionsViewModel: QuickActionsViewModel = viewModel(),
+    recipesViewModel: RecipesViewModel = viewModel(),
 ) {
     val view = LocalView.current
     val greeting = rememberGreeting()
+    val actions by quickActionsViewModel.enabledActions.collectAsState()
+    val recipes by recipesViewModel.recipes.collectAsState()
+    val controls = actions.filter { it.kind == QuickActionKind.MACHINE_CONTROL.name }
 
     SideEffect {
         val window = (view.context as Activity).window
@@ -100,7 +102,7 @@ fun HomeScreen(
                 modifier = Modifier.padding(top = 20.dp),
             )
             Text(
-                text = "What would you like to do today?",
+                text = "Tap a favorite beverage to brew, or control your machine.",
                 fontSize = 15.sp,
                 color = CoffeeText.copy(alpha = 0.55f),
                 modifier = Modifier.padding(top = 6.dp, bottom = 20.dp),
@@ -124,33 +126,162 @@ fun HomeScreen(
                 )
             }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 28.dp, bottom = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Quick Actions",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = CoffeeText,
-                )
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = CoffeeText.copy(alpha = 0.5f),
-                    modifier = Modifier.padding(start = 4.dp),
+            FavoriteBeveragesHeader(onOpenFavoriteBeverages = onOpenFavoriteBeverages)
+
+            if (recipes.isEmpty()) {
+                EmptyFavoriteBeveragesHint(onAdd = onOpenFavoriteBeverages)
+            } else {
+                FavoriteBeveragesGrid(
+                    recipes = recipes,
+                    onBrew = onBrewRecipe,
                 )
             }
 
-            QuickActionsGrid(
-                actions = quickActions,
-                onAction = onQuickAction,
-            )
+            if (controls.isNotEmpty()) {
+                MachineSectionHeader(onManage = onOpenManageMachine)
+                QuickActionsGrid(
+                    actions = controls,
+                    onAction = onMachineAction,
+                    highlightedFirst = false,
+                    isControl = true,
+                )
+            }
 
             Spacer(modifier = Modifier.height(16.dp))
         }
+    }
+}
+
+@Composable
+private fun FavoriteBeveragesHeader(onOpenFavoriteBeverages: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 28.dp, bottom = 14.dp)
+            .clickable(onClick = onOpenFavoriteBeverages),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Favorite Beverages",
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            color = CoffeeText,
+        )
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = "Open favorite beverages",
+            tint = CoffeeText.copy(alpha = 0.5f),
+            modifier = Modifier.padding(start = 4.dp),
+        )
+    }
+}
+
+@Composable
+private fun MachineSectionHeader(onManage: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 16.dp, bottom = 8.dp)
+            .clickable(onClick = onManage),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "Machine",
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = CoffeeText.copy(alpha = 0.5f),
+        )
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = "Manage machine controls",
+            tint = CoffeeText.copy(alpha = 0.35f),
+            modifier = Modifier
+                .padding(start = 2.dp)
+                .size(16.dp),
+        )
+    }
+}
+
+@Composable
+private fun EmptyFavoriteBeveragesHint(onAdd: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.85f))
+            .padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = "No favorite beverages yet",
+            fontWeight = FontWeight.SemiBold,
+            color = CoffeeText.copy(alpha = 0.7f),
+        )
+        Text(
+            text = "Create one in Favorite Beverages and it will appear here.",
+            fontSize = 13.sp,
+            color = CoffeeText.copy(alpha = 0.45f),
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        TextButton(onClick = onAdd) {
+            Text("Add favorite beverage", color = CoffeeBrown, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun FavoriteBeveragesGrid(
+    recipes: List<CoffeeRecipeEntity>,
+    onBrew: (CoffeeRecipeEntity) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        recipes.chunked(2).forEachIndexed { rowIndex, row ->
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                row.forEachIndexed { colIndex, recipe ->
+                    val highlighted = rowIndex == 0 && colIndex == 0
+                    BeverageChip(
+                        label = recipe.name,
+                        highlighted = highlighted,
+                        onClick = { onBrew(recipe) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                if (row.size == 1) {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun BeverageChip(
+    label: String,
+    highlighted: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val bg = if (highlighted) CoffeeBrown else Color.White.copy(alpha = 0.92f)
+    val fg = if (highlighted) Color.White else CoffeeBrown
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(bg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            color = fg,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+        )
     }
 }
 
@@ -255,19 +386,24 @@ private fun HubActionCard(
 
 @Composable
 private fun QuickActionsGrid(
-    actions: List<QuickAction>,
-    onAction: (String) -> Unit,
+    actions: List<QuickActionEntity>,
+    onAction: (QuickActionEntity) -> Unit,
+    highlightedFirst: Boolean,
+    isControl: Boolean = false,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        actions.chunked(2).forEach { row ->
+        actions.chunked(2).forEachIndexed { rowIndex, row ->
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                row.forEach { action ->
+                row.forEachIndexed { colIndex, action ->
+                    val highlighted = highlightedFirst && rowIndex == 0 && colIndex == 0
                     QuickActionChip(
-                        action = action,
-                        onClick = { onAction(action.prompt) },
+                        label = action.title,
+                        highlighted = highlighted,
+                        isControl = isControl,
+                        onClick = { onAction(action) },
                         modifier = Modifier.weight(1f),
                     )
                 }
@@ -281,12 +417,14 @@ private fun QuickActionsGrid(
 
 @Composable
 private fun QuickActionChip(
-    action: QuickAction,
+    label: String,
+    highlighted: Boolean,
+    isControl: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val bg = if (action.highlighted) CoffeeBrown else Color.White.copy(alpha = 0.92f)
-    val fg = if (action.highlighted) Color.White else CoffeeBrown
+    val bg = if (highlighted) CoffeeBrown else Color.White.copy(alpha = 0.92f)
+    val fg = if (highlighted) Color.White else CoffeeBrown
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(20.dp))
@@ -295,13 +433,26 @@ private fun QuickActionChip(
             .padding(horizontal = 14.dp, vertical = 12.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = action.label,
-            color = fg,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (isControl) {
+                Icon(
+                    imageVector = Icons.Default.PowerSettingsNew,
+                    contentDescription = null,
+                    tint = fg.copy(alpha = 0.7f),
+                    modifier = Modifier.size(14.dp),
+                )
+            }
+            Text(
+                text = label,
+                color = fg,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+        }
     }
 }
 

@@ -37,6 +37,36 @@ interface ChatSessionDao {
     @Query("SELECT * FROM chat_sessions ORDER BY updatedAt DESC")
     fun observeSessions(): Flow<List<ChatSessionEntity>>
 
+    @Query(
+        """
+        SELECT s.* FROM chat_sessions s
+        WHERE EXISTS (SELECT 1 FROM chat_messages m WHERE m.sessionId = s.id)
+        ORDER BY s.updatedAt DESC
+        """,
+    )
+    fun observeSessionsWithMessages(): Flow<List<ChatSessionEntity>>
+
+    @Query("SELECT COUNT(*) FROM chat_messages WHERE sessionId = :sessionId")
+    suspend fun messageCount(sessionId: String): Int
+
+    @Query(
+        """
+        SELECT s.* FROM chat_sessions s
+        WHERE NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.sessionId = s.id)
+        ORDER BY s.updatedAt DESC
+        LIMIT 1
+        """,
+    )
+    suspend fun findDraftSession(): ChatSessionEntity?
+
+    @Query(
+        """
+        DELETE FROM chat_sessions
+        WHERE id NOT IN (SELECT DISTINCT sessionId FROM chat_messages)
+        """,
+    )
+    suspend fun deleteSessionsWithoutMessages()
+
     @Query("SELECT * FROM chat_sessions WHERE isFavorite = 1 ORDER BY updatedAt DESC")
     fun observeFavorites(): Flow<List<ChatSessionEntity>>
 
@@ -93,10 +123,21 @@ class ChatSessionStore(context: Context) {
     private val dao = ChatDatabase.getInstance(context).chatSessionDao()
 
     val sessions: Flow<List<ChatSessionEntity>> = dao.observeSessions()
+    val sessionsWithMessages: Flow<List<ChatSessionEntity>> = dao.observeSessionsWithMessages()
     val favorites: Flow<List<ChatSessionEntity>> = dao.observeFavorites()
 
     suspend fun messagesFor(sessionId: String): List<ChatMessageEntity> =
         dao.messagesFor(sessionId)
+
+    suspend fun getSession(id: String): ChatSessionEntity? = dao.getSession(id)
+
+    suspend fun findDraftSession(): ChatSessionEntity? = dao.findDraftSession()
+
+    suspend fun deleteSessionsWithoutMessages() {
+        dao.deleteSessionsWithoutMessages()
+    }
+
+    suspend fun hasMessages(sessionId: String): Boolean = dao.messageCount(sessionId) > 0
 
     suspend fun createSession(id: String, title: String, preview: String, accentIndex: Int) {
         dao.upsertSession(

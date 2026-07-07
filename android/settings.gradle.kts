@@ -17,3 +17,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "CoffeeAI"
 include(":app")
+include(":whisper")

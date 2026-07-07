@@ -2,6 +2,8 @@ package com.personaledge.ai.chat
 
 import androidx.activity.compose.BackHandler
 import android.app.Activity
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,11 +15,14 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -29,9 +34,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -53,6 +61,7 @@ import com.personaledge.ai.ui.theme.CoffeeBrown
 import com.personaledge.ai.ui.theme.CoffeeCream
 import com.personaledge.ai.ui.theme.CoffeeText
 import com.personaledge.ai.ui.theme.Error
+import kotlinx.coroutines.launch
 
 private const val GREETING = "Hi! I'm CoffeeAI. What would you like to explore today?"
 
@@ -72,6 +81,19 @@ fun ChatScreen(
     var autoTts by remember { mutableStateOf(true) }
     var lastSpoken by remember { mutableStateOf("") }
     val view = LocalView.current
+    val scope = rememberCoroutineScope()
+
+    fun setAutoTts(enabled: Boolean) {
+        autoTts = enabled
+        tts.autoReadReplies = enabled
+        if (!enabled) {
+            tts.stop()
+        }
+        scope.launch {
+            val config = app.syncClient.getBackendConfig()
+            app.syncClient.saveBackendConfig(config.copy(autoTts = enabled))
+        }
+    }
 
     onBack?.let { back ->
         BackHandler { back() }
@@ -90,6 +112,7 @@ fun ChatScreen(
 
     LaunchedEffect(Unit) {
         autoTts = app.syncClient.getBackendConfig().autoTts
+        tts.autoReadReplies = autoTts
     }
 
     LaunchedEffect(state.messages.lastOrNull()?.content, state.isLoading, autoTts) {
@@ -114,11 +137,13 @@ fun ChatScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding(),
+                .statusBarsPadding(),
         ) {
-            LetsChatHeader(onBack = onBack)
+            LetsChatHeader(
+                onBack = onBack,
+                ttsEnabled = autoTts,
+                onToggleTts = { setAutoTts(!autoTts) },
+            )
 
             if (!state.isEngineReady && state.error != null) {
                 Text(
@@ -199,13 +224,20 @@ fun ChatScreen(
                 onLetsTalk = onVoiceMode,
                 enabled = !state.isLoading,
                 canSend = (state.inputText.isNotBlank() || state.pendingImagePath != null) && !state.isLoading,
+                modifier = Modifier
+                    .navigationBarsPadding()
+                    .imePadding(),
             )
         }
     }
 }
 
 @Composable
-private fun LetsChatHeader(onBack: (() -> Unit)?) {
+private fun LetsChatHeader(
+    onBack: (() -> Unit)?,
+    ttsEnabled: Boolean,
+    onToggleTts: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -226,24 +258,57 @@ private fun LetsChatHeader(onBack: (() -> Unit)?) {
 
         Text(
             text = "Let's Chat",
-            modifier = Modifier.weight(1f),
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 4.dp),
             textAlign = TextAlign.Center,
             fontSize = 20.sp,
             fontWeight = FontWeight.Bold,
             color = CoffeeText,
         )
 
-        Column(
-            modifier = Modifier.padding(end = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(end = 8.dp),
         ) {
-            CoffeeAiMark(modifier = Modifier.size(28.dp), color = CoffeeBrown)
-            Text(
-                text = "CoffeeAI",
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = CoffeeBrown,
-            )
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (ttsEnabled) CoffeeBrown.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.85f),
+                    )
+                    .clickable(onClick = onToggleTts),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = if (ttsEnabled) {
+                        Icons.AutoMirrored.Filled.VolumeUp
+                    } else {
+                        Icons.AutoMirrored.Filled.VolumeOff
+                    },
+                    contentDescription = if (ttsEnabled) {
+                        "Turn off read aloud"
+                    } else {
+                        "Turn on read aloud"
+                    },
+                    tint = if (ttsEnabled) CoffeeBrown else CoffeeText.copy(alpha = 0.45f),
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CoffeeAiMark(modifier = Modifier.size(28.dp), color = CoffeeBrown)
+                Text(
+                    text = "CoffeeAI",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = CoffeeBrown,
+                )
+            }
         }
     }
 }

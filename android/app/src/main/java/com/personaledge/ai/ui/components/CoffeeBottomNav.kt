@@ -31,7 +31,7 @@ import com.personaledge.ai.ui.theme.CoffeeText
 enum class CoffeeNavTab(val label: String, val icon: ImageVector) {
     Home("Home", Icons.Default.Chat),
     Chats("Chats", Icons.Default.Search),
-    Favorites("Favorites", Icons.Default.Favorite),
+    Favorites("Beverages", Icons.Default.Favorite),
     Profile("Profile", Icons.Default.Person),
 }
 

@@ -46,8 +46,9 @@ fun CoffeeChatComposer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+            .padding(horizontal = 20.dp)
+            .padding(top = 8.dp, bottom = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         MessageInputBar(
             text = text,

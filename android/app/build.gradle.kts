@@ -13,8 +13,8 @@ android {
         applicationId = "com.personaledge.ai"
         minSdk = 31
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 5
+        versionName = "1.4"
 
         buildConfigField("String", "CLOUD_URL", "\"https://personal-edge-ai.vercel.app\"")
         buildConfigField("String", "CLOUD_API_KEY", "\"dev-api-key-change-me\"")
@@ -105,6 +105,8 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.8.1")
 
     implementation("com.google.ai.edge.litertlm:litertlm-android:0.13.1")
+
+    implementation(project(":whisper"))
 
     implementation("com.xdcobra.sherpa:sherpa-onnx:1.13.2-1")
 

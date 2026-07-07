@@ -5,49 +5,53 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.personaledge.ai.EdgeAiApplication
 import com.personaledge.ai.chat.ChatSessionEntity
+import com.personaledge.ai.coffee.SavedTopicEntity
+import com.personaledge.ai.coffee.CoffeeRecipeEntity
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 class FavoritesViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as EdgeAiApplication
-    private val store = app.chatSessionStore
+    private val chatStore = app.chatSessionStore
+    private val actionStore = app.coffeeActionStore
 
-    val favorites: StateFlow<List<ChatSessionEntity>> = store.favorites
+    val favorites: StateFlow<List<ChatSessionEntity>> = chatStore.favorites
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    val recipes: StateFlow<List<CoffeeRecipeEntity>> = actionStore.recipes
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val savedTopics: StateFlow<List<SavedTopicEntity>> = actionStore.savedTopics
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    val allTopics: StateFlow<List<SavedTopicEntity>> = actionStore.allTopics
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    init {
+        viewModelScope.launch { actionStore.seedDefaultsIfNeeded() }
+    }
+
     fun setFavorite(sessionId: String, favorite: Boolean) {
-        viewModelScope.launch { store.setFavorite(sessionId, favorite) }
+        viewModelScope.launch { chatStore.setFavorite(sessionId, favorite) }
     }
 
     fun deleteSession(sessionId: String) {
-        viewModelScope.launch { store.deleteSession(sessionId) }
+        viewModelScope.launch { chatStore.deleteSession(sessionId) }
     }
 
-    suspend fun ensureSampleFavorites() {
-        var sessions = store.sessions.first()
-        if (sessions.isEmpty()) {
-            val samples = listOf(
-                "CoffeeAI Logo Design" to "Discuss brand colors and AI visual direction",
-                "Morning Coffee Recipe" to "Find a strong but smooth espresso idea",
-                "Brewing Tips" to "Ask about water temperature and grind size",
-                "Coffee Shop Recommendations" to "Discover cozy spots nearby",
-            )
-            samples.forEachIndexed { index, (title, preview) ->
-                store.createSession(
-                    id = java.util.UUID.randomUUID().toString(),
-                    title = title,
-                    preview = preview,
-                    accentIndex = index % 4,
-                )
-            }
-            sessions = store.sessions.first()
+    fun deleteRecipe(id: String) {
+        viewModelScope.launch { actionStore.deleteRecipe(id) }
+    }
+
+    fun saveRecipe(recipe: CoffeeRecipeEntity) {
+        viewModelScope.launch { actionStore.saveRecipe(recipe) }
+    }
+
+    fun toggleTopicSaved(topic: SavedTopicEntity, saved: Boolean) {
+        viewModelScope.launch {
+            actionStore.upsertTopic(topic.copy(isSaved = saved))
         }
-        val pinTitles = setOf("Morning Coffee Recipe", "Brewing Tips")
-        sessions
-            .filter { it.title in pinTitles && !it.isFavorite }
-            .forEach { store.setFavorite(it.id, true) }
     }
 }

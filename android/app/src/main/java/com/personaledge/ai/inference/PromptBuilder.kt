@@ -24,4 +24,14 @@ object PromptBuilder {
         }
         return parts.joinToString("\n\n")
     }
+
+    fun buildVoiceSystemInstruction(context: MemoryContext): String {
+        return buildSystemInstruction(context) + """
+
+            Voice conversation mode:
+            - Reply in 1–3 short spoken sentences (under 40 words total when possible).
+            - Use plain conversational language — no markdown, bullets, or code blocks.
+            - Get to the point immediately; skip preamble.
+        """.trimIndent()
+    }
 }

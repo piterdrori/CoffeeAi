@@ -17,12 +17,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.ChatBubbleOutline
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.LocalCafe
-import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
@@ -31,7 +32,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -40,71 +40,35 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.personaledge.ai.chat.ChatSessionEntity
+import com.personaledge.ai.coffee.CoffeeRecipeEntity
+import com.personaledge.ai.coffee.SavedTopicEntity
 import com.personaledge.ai.ui.theme.CoffeeBrown
 import com.personaledge.ai.ui.theme.CoffeeCream
 import com.personaledge.ai.ui.theme.CoffeeText
 
-private data class FavoriteShortcut(
-    val title: String,
-    val subtitle: String,
-    val icon: ImageVector,
-    val action: FavoriteShortcutAction,
-)
-
-private sealed interface FavoriteShortcutAction {
-    data class Prompt(val text: String) : FavoriteShortcutAction
-    data object Voice : FavoriteShortcutAction
-}
-
-private val coffeeShortcuts = listOf(
-    FavoriteShortcut(
-        title = "Brewing Tips",
-        subtitle = "Grind size, water temp & pour-over basics",
-        icon = Icons.Default.LocalCafe,
-        action = FavoriteShortcutAction.Prompt("What are your best brewing tips for great coffee?"),
-    ),
-    FavoriteShortcut(
-        title = "Coffee Recipes",
-        subtitle = "Espresso, cold brew & specialty drinks",
-        icon = Icons.Default.LocalCafe,
-        action = FavoriteShortcutAction.Prompt("Can you suggest a strong coffee recipe?"),
-    ),
-    FavoriteShortcut(
-        title = "Morning Routine",
-        subtitle = "Plan your perfect start to the day",
-        icon = Icons.Default.WbSunny,
-        action = FavoriteShortcutAction.Prompt("Help me plan my morning coffee routine."),
-    ),
-    FavoriteShortcut(
-        title = "Let's Talk",
-        subtitle = "Voice chat with CoffeeAI offline",
-        icon = Icons.Default.Mic,
-        action = FavoriteShortcutAction.Voice,
-    ),
-)
-
 @Composable
 fun FavoritesScreen(
     onOpenChat: (String) -> Unit,
-    onQuickAction: (String) -> Unit,
-    onLetsTalk: () -> Unit,
+    onBrewRecipe: (CoffeeRecipeEntity) -> Unit,
+    onHelpTopic: (String) -> Unit,
+    onAddRecipe: () -> Unit,
+    onEditRecipe: (CoffeeRecipeEntity) -> Unit,
+    onBrowseHelp: () -> Unit,
     modifier: Modifier = Modifier,
     viewModel: FavoritesViewModel = viewModel(),
 ) {
     val favorites by viewModel.favorites.collectAsState()
+    val recipes by viewModel.recipes.collectAsState()
+    val savedTopics by viewModel.savedTopics.collectAsState()
     var editMode by remember { mutableStateOf(false) }
-
-    LaunchedEffect(Unit) {
-        viewModel.ensureSampleFavorites()
-    }
 
     Column(
         modifier = modifier
@@ -125,18 +89,60 @@ fun FavoritesScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (favorites.isEmpty()) {
-                item { EmptyFavoritesHint() }
+            item {
+                SectionHeader(
+                    title = "Your beverages",
+                    action = {
+                        IconButton(onClick = onAddRecipe) {
+                            Icon(Icons.Default.Add, contentDescription = "Add recipe", tint = CoffeeBrown)
+                        }
+                    },
+                )
+            }
+
+            if (recipes.isEmpty()) {
+                item { EmptyRecipesHint(onAdd = onAddRecipe) }
+            } else {
+                items(recipes, key = { it.id }) { recipe ->
+                    RecipeCard(
+                        recipe = recipe,
+                        editMode = editMode,
+                        onBrew = { onBrewRecipe(recipe) },
+                        onEdit = { onEditRecipe(recipe) },
+                        onDelete = { viewModel.deleteRecipe(recipe.id) },
+                    )
+                }
+            }
+
+            item {
+                SectionHeader(
+                    title = "Saved Help",
+                    modifier = androidx.compose.ui.Modifier.padding(top = 8.dp),
+                    action = {
+                        TextButton(onClick = onBrowseHelp) {
+                            Text("Browse", color = CoffeeBrown, fontSize = 14.sp)
+                        }
+                    },
+                )
+            }
+
+            if (savedTopics.isEmpty()) {
+                item { EmptyHelpHint(onBrowse = onBrowseHelp) }
+            } else {
+                items(savedTopics, key = { it.id }) { topic ->
+                    HelpTopicCard(
+                        topic = topic,
+                        onClick = { onHelpTopic(topic.prompt) },
+                        onUnsave = { viewModel.toggleTopicSaved(topic, false) },
+                    )
+                }
             }
 
             if (favorites.isNotEmpty()) {
                 item {
-                    Text(
-                        text = "Pinned Chats",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = CoffeeText.copy(alpha = 0.5f),
-                        modifier = Modifier.padding(start = 4.dp, bottom = 2.dp),
+                    SectionHeader(
+                        title = "Pinned Chats",
+                        modifier = androidx.compose.ui.Modifier.padding(top = 8.dp),
                     )
                 }
                 items(favorites, key = { it.id }) { session ->
@@ -149,29 +155,78 @@ fun FavoritesScreen(
                     )
                 }
             }
+        }
+    }
+}
 
-            item {
-                Text(
-                    text = if (favorites.isEmpty()) "Quick Starts" else "Quick Starts",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = CoffeeText.copy(alpha = 0.5f),
-                    modifier = Modifier.padding(start = 4.dp, bottom = 2.dp, top = if (favorites.isEmpty()) 4.dp else 4.dp),
-                )
-            }
-
-            items(coffeeShortcuts, key = { it.title }) { shortcut ->
-                ShortcutCard(
-                    shortcut = shortcut,
-                    onClick = {
-                        when (val action = shortcut.action) {
-                            is FavoriteShortcutAction.Prompt -> onQuickAction(action.text)
-                            FavoriteShortcutAction.Voice -> onLetsTalk()
-                        }
-                    },
-                )
+@Composable
+fun HelpTopicsSheet(
+    topics: List<SavedTopicEntity>,
+    onToggleSave: (SavedTopicEntity, Boolean) -> Unit,
+    onSelect: (SavedTopicEntity) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White)
+            .padding(20.dp),
+    ) {
+        Text("Help topics", fontWeight = FontWeight.Bold, fontSize = 18.sp, color = CoffeeText)
+        Text(
+            "Save guides for operating, servicing, or shopping for your machine.",
+            fontSize = 13.sp,
+            color = CoffeeText.copy(alpha = 0.55f),
+            modifier = Modifier.padding(top = 4.dp, bottom = 16.dp),
+        )
+        topics.forEach { topic ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable { onSelect(topic) }
+                    .padding(vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(topic.title, fontWeight = FontWeight.SemiBold, color = CoffeeText)
+                    Text(topic.category, fontSize = 12.sp, color = CoffeeText.copy(alpha = 0.45f))
+                }
+                IconButton(onClick = { onToggleSave(topic, !topic.isSaved) }) {
+                    Icon(
+                        Icons.Default.Bookmark,
+                        contentDescription = if (topic.isSaved) "Unsave" else "Save",
+                        tint = if (topic.isSaved) CoffeeBrown else CoffeeText.copy(alpha = 0.25f),
+                    )
+                }
             }
         }
+        TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+            Text("Done", color = CoffeeBrown)
+        }
+    }
+}
+
+@Composable
+private fun SectionHeader(
+    title: String,
+    modifier: Modifier = Modifier,
+    action: @Composable (() -> Unit)? = null,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = title,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = CoffeeText.copy(alpha = 0.5f),
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 4.dp, bottom = 2.dp),
+        )
+        action?.invoke()
     }
 }
 
@@ -189,7 +244,7 @@ private fun FavoritesTopBar(
     ) {
         Spacer(modifier = Modifier.size(48.dp))
         Text(
-            text = "Favorites",
+            text = "Favorite Beverages",
             fontSize = 18.sp,
             fontWeight = FontWeight.Bold,
             color = CoffeeText,
@@ -233,12 +288,7 @@ private fun FavoriteCardShell(
                 .background(CoffeeBrown),
             contentAlignment = Alignment.Center,
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = Color.White,
-                modifier = Modifier.size(24.dp),
-            )
+            Icon(imageVector = icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(24.dp))
         }
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -263,6 +313,60 @@ private fun FavoriteCardShell(
 }
 
 @Composable
+private fun RecipeCard(
+    recipe: CoffeeRecipeEntity,
+    editMode: Boolean,
+    onBrew: () -> Unit,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+
+    FavoriteCardShell(
+        icon = Icons.Default.LocalCafe,
+        title = recipe.name,
+        subtitle = recipe.summary,
+        onClick = onBrew,
+        trailing = {
+            if (editMode) {
+                IconButton(onClick = onDelete, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Delete", tint = CoffeeBrown, modifier = Modifier.size(20.dp))
+                }
+            } else {
+                Box {
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.MoreHoriz, contentDescription = "More", tint = CoffeeText.copy(alpha = 0.45f))
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Edit") }, onClick = { menuOpen = false; onEdit() })
+                        DropdownMenuItem(text = { Text("Delete") }, onClick = { menuOpen = false; onDelete() })
+                    }
+                }
+            }
+        },
+    )
+}
+
+@Composable
+private fun HelpTopicCard(
+    topic: SavedTopicEntity,
+    onClick: () -> Unit,
+    onUnsave: () -> Unit,
+) {
+    FavoriteCardShell(
+        icon = Icons.Default.MenuBook,
+        title = topic.title,
+        subtitle = topic.category,
+        onClick = onClick,
+        trailing = {
+            IconButton(onClick = onUnsave, modifier = Modifier.size(36.dp)) {
+                Icon(Icons.Default.Bookmark, contentDescription = "Unsave", tint = CoffeeBrown, modifier = Modifier.size(20.dp))
+            }
+        },
+    )
+}
+
+@Composable
 private fun PinnedChatCard(
     session: ChatSessionEntity,
     editMode: Boolean,
@@ -279,47 +383,17 @@ private fun PinnedChatCard(
         onClick = onOpen,
         trailing = {
             if (editMode) {
-                IconButton(
-                    onClick = onUnpin,
-                    modifier = Modifier.size(36.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Close,
-                        contentDescription = "Unpin chat",
-                        tint = CoffeeBrown,
-                        modifier = Modifier.size(20.dp),
-                    )
+                IconButton(onClick = onUnpin, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Default.Close, contentDescription = "Unpin", tint = CoffeeBrown, modifier = Modifier.size(20.dp))
                 }
             } else {
                 Box {
-                    IconButton(
-                        onClick = { menuOpen = true },
-                        modifier = Modifier.size(36.dp),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.MoreHoriz,
-                            contentDescription = "More options",
-                            tint = CoffeeText.copy(alpha = 0.45f),
-                        )
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Default.MoreHoriz, contentDescription = "More", tint = CoffeeText.copy(alpha = 0.45f))
                     }
-                    DropdownMenu(
-                        expanded = menuOpen,
-                        onDismissRequest = { menuOpen = false },
-                    ) {
-                        DropdownMenuItem(
-                            text = { Text("Unpin") },
-                            onClick = {
-                                menuOpen = false
-                                onUnpin()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Delete chat") },
-                            onClick = {
-                                menuOpen = false
-                                onDelete()
-                            },
-                        )
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("Unpin") }, onClick = { menuOpen = false; onUnpin() })
+                        DropdownMenuItem(text = { Text("Delete chat") }, onClick = { menuOpen = false; onDelete() })
                     }
                 }
             }
@@ -328,48 +402,50 @@ private fun PinnedChatCard(
 }
 
 @Composable
-private fun ShortcutCard(
-    shortcut: FavoriteShortcut,
-    onClick: () -> Unit,
-) {
-    FavoriteCardShell(
-        icon = shortcut.icon,
-        title = shortcut.title,
-        subtitle = shortcut.subtitle,
-        onClick = onClick,
-        trailing = {
-            Icon(
-                imageVector = Icons.Default.MoreHoriz,
-                contentDescription = null,
-                tint = CoffeeText.copy(alpha = 0.3f),
-                modifier = Modifier
-                    .padding(end = 4.dp)
-                    .size(20.dp),
-            )
-        },
-    )
-}
-
-@Composable
-private fun EmptyFavoritesHint() {
+private fun EmptyRecipesHint(onAdd: () -> Unit) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 8.dp, vertical = 16.dp),
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.7f))
+            .padding(20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
+        Text("No favorite beverages yet", fontWeight = FontWeight.SemiBold, color = CoffeeText.copy(alpha = 0.7f))
         Text(
-            text = "No pinned chats yet",
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = CoffeeText.copy(alpha = 0.7f),
-        )
-        Text(
-            text = "Star a conversation from Chats, or try a quick start below",
+            "Create a beverage here — it will appear on Home under Favorite Beverages.",
             fontSize = 13.sp,
             color = CoffeeText.copy(alpha = 0.45f),
             textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             modifier = Modifier.padding(top = 6.dp),
         )
+        TextButton(onClick = onAdd) {
+            Icon(Icons.Default.Add, contentDescription = null, tint = CoffeeBrown)
+            Text("Add favorite beverage", color = CoffeeBrown, modifier = Modifier.padding(start = 4.dp))
+        }
+    }
+}
+
+@Composable
+private fun EmptyHelpHint(onBrowse: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Color.White.copy(alpha = 0.7f))
+            .padding(20.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text("No saved help topics", fontWeight = FontWeight.SemiBold, color = CoffeeText.copy(alpha = 0.7f))
+        Text(
+            "Save guides for operating, cleaning, or shopping for your machine.",
+            fontSize = 13.sp,
+            color = CoffeeText.copy(alpha = 0.45f),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+        TextButton(onClick = onBrowse) {
+            Text("Browse topics", color = CoffeeBrown)
+        }
     }
 }

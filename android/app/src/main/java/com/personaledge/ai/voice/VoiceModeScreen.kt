@@ -7,7 +7,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,13 +19,13 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -36,6 +35,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -60,11 +60,17 @@ import com.personaledge.ai.ui.components.CoffeeAiMark
 import com.personaledge.ai.ui.components.LetsTalkPulseOrb
 import com.personaledge.ai.ui.theme.CoffeeBrown
 import com.personaledge.ai.ui.theme.CoffeeBrownDark
-import com.personaledge.ai.ui.theme.CoffeeCreamDeep
 import com.personaledge.ai.ui.theme.CoffeeText
 import com.personaledge.ai.ui.theme.Error
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+
+private enum class VoiceTalkPhase {
+    Inactive,
+    Listening,
+    Thinking,
+    Speaking,
+}
 
 @Composable
 fun VoiceModeScreen(
@@ -78,16 +84,30 @@ fun VoiceModeScreen(
     val stt = app.sttManager
     val tts = app.ttsManager
     val chatState by chatViewModel.uiState.collectAsState()
-    val isListening by stt.isListening.collectAsState()
     val partial by stt.partialText.collectAsState()
-    val final by stt.finalText.collectAsState()
     val sttError by stt.error.collectAsState()
     val isModelReady by stt.isModelReady.collectAsState()
     val isModelLoading by stt.isModelLoading.collectAsState()
+    val sessionActive by stt.sessionActive.collectAsState()
     val isSpeaking by tts.isSpeaking.collectAsState()
-    var awaitingReply by remember { mutableStateOf(false) }
-    var lastSpoken by remember { mutableStateOf("") }
-    var resumeListeningAfterTts by remember { mutableStateOf(false) }
+    val isTranscribing by stt.isTranscribing.collectAsState()
+    val transcribeSeconds by stt.transcribeSeconds.collectAsState()
+    val micLevel by stt.micLevel.collectAsState()
+    val micConnected by stt.micConnected.collectAsState()
+    val micInputSilent by stt.micInputSilent.collectAsState()
+
+    var phase by remember { mutableStateOf(VoiceTalkPhase.Inactive) }
+    var spokenChars by remember { mutableIntStateOf(0) }
+    var liveTranscript by remember { mutableStateOf("") }
+
+    fun resumeListening() {
+        phase = VoiceTalkPhase.Listening
+        spokenChars = 0
+        stt.setAcceptingUtterance(true)
+        stt.setBargeInEnabled(enabled = false)
+        liveTranscript = ""
+        stt.clearText()
+    }
 
     SideEffect {
         val window = (view.context as Activity).window
@@ -96,46 +116,119 @@ fun VoiceModeScreen(
         WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
     }
 
-    fun exitVoice() {
-        resumeListeningAfterTts = false
-        stt.stopListening()
+    fun stopVoiceSession() {
         tts.stop()
+        chatViewModel.cancelResponse()
+        chatViewModel.endVoiceSession()
+        stt.setBargeInEnabled(enabled = false)
+        stt.stopSession()
+        phase = VoiceTalkPhase.Inactive
+        spokenChars = 0
+        liveTranscript = ""
+        stt.clearText()
+        stt.startMicMonitor()
+    }
+
+    fun interruptAiAndListen() {
+        // #region agent log
+        VoiceDebugLog.log(
+            hypothesisId = "E",
+            location = "VoiceModeScreen.kt:interruptAiAndListen",
+            message = "user interrupt",
+            data = mapOf(
+                "phase" to phase.name,
+                "isSpeaking" to isSpeaking,
+                "isLoading" to chatState.isLoading,
+            ),
+        )
+        // #endregion
+        tts.stop()
+        chatViewModel.cancelResponse()
+        spokenChars = 0
+        stt.setTtsPlaybackActive(false)
+        if (sessionActive) {
+            resumeListening()
+        }
+    }
+
+    fun exitVoice() {
+        stopVoiceSession()
         onBack()
     }
 
-    BackHandler { exitVoice() }
-
-    val orbActive = isListening || isSpeaking || chatState.isLoading || awaitingReply
-
-    val statusTitle = when {
-        isModelLoading -> "Loading voice model…"
-        !isModelReady -> "Voice model not ready"
-        isSpeaking -> "Speaking…"
-        chatState.isLoading || awaitingReply -> "Thinking…"
-        isListening -> "Listening…"
-        else -> "Ready to listen"
+    fun startVoiceSession() {
+        if (!isModelReady) return
+        phase = VoiceTalkPhase.Listening
+        liveTranscript = ""
+        stt.clearText()
+        stt.setAcceptingUtterance(true)
+        stt.onUtteranceComplete = { text ->
+            scope.launch(Dispatchers.Main) {
+                if (phase != VoiceTalkPhase.Listening) return@launch
+                liveTranscript = text
+                spokenChars = 0
+                phase = VoiceTalkPhase.Thinking
+                stt.setAcceptingUtterance(false)
+                stt.setBargeInEnabled(enabled = true, speaking = false)
+                chatViewModel.updateInput(text)
+                chatViewModel.sendVoiceMessage()
+            }
+        }
+        stt.onBargeIn = {
+            scope.launch(Dispatchers.Main) {
+                // #region agent log
+                VoiceDebugLog.log(
+                    hypothesisId = "E",
+                    location = "VoiceModeScreen.kt:onBargeIn",
+                    message = "barge-in callback",
+                    data = mapOf("phase" to phase.name, "isSpeaking" to isSpeaking),
+                )
+                // #endregion
+                if (phase == VoiceTalkPhase.Thinking || phase == VoiceTalkPhase.Speaking) {
+                    tts.stop()
+                    chatViewModel.cancelResponse()
+                    resumeListening()
+                }
+            }
+        }
+        stt.onPartialText = { text ->
+            scope.launch(Dispatchers.Main) {
+                if (phase == VoiceTalkPhase.Listening) {
+                    liveTranscript = text
+                }
+            }
+        }
+        stt.startSession()
+        chatViewModel.beginVoiceSession()
     }
 
-    val statusSubtitle = when {
-        isSpeaking -> "Tap pause to interrupt"
-        chatState.isLoading || awaitingReply -> "Please wait"
-        isListening -> "Speak now or tap to pause"
-        else -> "Tap the mic to start"
+    BackHandler {
+        if (sessionActive) stopVoiceSession() else exitVoice()
     }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) stt.initModel()
+        if (granted) {
+            stt.initModel()
+            stt.startMicMonitor()
+        }
     }
 
     DisposableEffect(Unit) {
         tts.onSpeakComplete = {
-            if (resumeListeningAfterTts && isModelReady) {
-                resumeListeningAfterTts = false
-                scope.launch {
-                    delay(450)
-                    stt.startListening()
+            scope.launch(Dispatchers.Main) {
+                if (!sessionActive || phase != VoiceTalkPhase.Speaking) return@launch
+                val last = chatState.messages.lastOrNull()
+                val stillStreaming = chatState.isLoading || last?.isStreaming == true
+                val more = last?.content?.let { content ->
+                    VoiceSpeakPlanner.nextChunk(content, spokenChars, stillStreaming)
+                }
+                if (more != null) {
+                    spokenChars = more.second
+                    tts.speak(more.first)
+                } else if (!stillStreaming) {
+                    resumeListening()
                 }
             }
         }
@@ -143,50 +236,114 @@ fun VoiceModeScreen(
             == PackageManager.PERMISSION_GRANTED
         ) {
             stt.initModel()
+            stt.startMicMonitor()
         } else {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         }
         onDispose {
             tts.onSpeakComplete = null
-            stt.stopListening()
-            tts.stop()
-        }
-    }
-
-    LaunchedEffect(isModelReady) {
-        if (isModelReady && !isListening && !isSpeaking && !chatState.isLoading) {
-            stt.startListening()
+            stt.onUtteranceComplete = null
+            stt.onBargeIn = null
+            stt.onPartialText = null
+            stopVoiceSession()
+            stt.stopMicMonitor()
         }
     }
 
     LaunchedEffect(Unit) {
         tts.autoReadReplies = app.syncClient.getBackendConfig().autoTts
+        chatViewModel.loadActiveModel()
     }
 
-    LaunchedEffect(chatState.messages.lastOrNull()?.content, chatState.isLoading) {
-        val last = chatState.messages.lastOrNull()
-        if (!chatState.isLoading && awaitingReply) {
-            awaitingReply = false
-        }
-        if (!chatState.isLoading && last?.role == "assistant" && last.content.isNotBlank() &&
-            last.content != lastSpoken && tts.autoReadReplies
-        ) {
-            lastSpoken = last.content
-            resumeListeningAfterTts = true
-            tts.speak(last.content)
+    LaunchedEffect(phase, isSpeaking, sessionActive) {
+        if (!sessionActive) return@LaunchedEffect
+        // #region agent log
+        VoiceDebugLog.log(
+            hypothesisId = "A",
+            location = "VoiceModeScreen.kt:phaseEffect",
+            message = "phase/isSpeaking sync",
+            data = mapOf(
+                "phase" to phase.name,
+                "isSpeaking" to isSpeaking,
+                "sessionActive" to sessionActive,
+                "isLoading" to chatState.isLoading,
+            ),
+        )
+        // #endregion
+        stt.setTtsPlaybackActive(isSpeaking)
+        when (phase) {
+            VoiceTalkPhase.Thinking ->
+                stt.setBargeInEnabled(enabled = true, speaking = false)
+            VoiceTalkPhase.Speaking ->
+                stt.setBargeInEnabled(enabled = true, speaking = true)
+            else -> Unit
         }
     }
 
-    LaunchedEffect(isListening, final, partial) {
-        if (!isListening && !chatState.isLoading && !awaitingReply && !isSpeaking) {
-            val text = stt.capturedText()
-            if (text.isNotBlank()) {
-                awaitingReply = true
-                chatViewModel.updateInput(text)
-                chatViewModel.sendMessage()
-                stt.clearText()
+    LaunchedEffect(chatState.messages, chatState.isLoading, chatState.error, sessionActive, phase) {
+        if (!sessionActive) return@LaunchedEffect
+
+        if (chatState.error != null && (phase == VoiceTalkPhase.Thinking || phase == VoiceTalkPhase.Speaking)) {
+            resumeListening()
+            return@LaunchedEffect
+        }
+
+        val last = chatState.messages.lastOrNull() ?: return@LaunchedEffect
+        if (last.role != "assistant" || !tts.autoReadReplies) return@LaunchedEffect
+        if (phase != VoiceTalkPhase.Thinking && phase != VoiceTalkPhase.Speaking) return@LaunchedEffect
+
+        val stillStreaming = chatState.isLoading || last.isStreaming
+        val planned = VoiceSpeakPlanner.nextChunk(last.content, spokenChars, stillStreaming) ?: run {
+            if (!stillStreaming && phase == VoiceTalkPhase.Thinking && last.content.isBlank()) {
+                resumeListening()
             }
+            return@LaunchedEffect
         }
+
+        if (phase == VoiceTalkPhase.Thinking) {
+            phase = VoiceTalkPhase.Speaking
+            stt.setAcceptingUtterance(false)
+        }
+        spokenChars = planned.second
+        tts.speak(planned.first)
+    }
+
+    val orbActive = sessionActive && phase != VoiceTalkPhase.Inactive
+
+    val statusTitle = when {
+        isModelLoading -> "Loading voice model…"
+        !isModelReady -> "Voice model not ready"
+        !chatState.isEngineReady && !sessionActive -> "Loading chat model…"
+        phase == VoiceTalkPhase.Speaking || isSpeaking -> "Speaking…"
+        phase == VoiceTalkPhase.Thinking || chatState.isLoading -> "Thinking…"
+        phase == VoiceTalkPhase.Listening && isTranscribing -> "Transcribing…"
+        phase == VoiceTalkPhase.Listening -> "Listening…"
+        else -> "Tap Start to talk"
+    }
+
+    val statusSubtitle = when {
+        phase == VoiceTalkPhase.Speaking || isSpeaking ->
+            "Tap Stop AI to interrupt — voice stays active"
+        phase == VoiceTalkPhase.Thinking && !chatState.isEngineReady ->
+            "Loading CoffeeAI model — first launch can take a minute"
+        phase == VoiceTalkPhase.Thinking || chatState.isLoading ->
+            "Speak anytime to interrupt"
+        phase == VoiceTalkPhase.Listening && isTranscribing ->
+            if (transcribeSeconds > 0) {
+                "Whisper is processing (${transcribeSeconds}s)…"
+            } else if (SherpaVoiceConfig.useOnlineSttOnEmulator) {
+                "Online speech recognition (emulator — needs internet)"
+            } else {
+                "Whisper is processing your speech"
+            }
+        phase == VoiceTalkPhase.Listening ->
+            "Pause 2–3 seconds when you're done"
+        !chatState.isEngineReady && !sessionActive ->
+            chatState.engineStatus
+        sessionActive ->
+            "Voice session active"
+        else ->
+            "Hands-free conversation until you tap Stop"
     }
 
     Column(
@@ -210,17 +367,7 @@ fun VoiceModeScreen(
 
             LetsTalkPulseOrb(
                 active = orbActive,
-                modifier = Modifier.clickable(enabled = isModelReady) {
-                    when {
-                        isSpeaking -> {
-                            resumeListeningAfterTts = false
-                            tts.stop()
-                            stt.startListening()
-                        }
-                        isListening -> stt.stopListening()
-                        else -> stt.startListening()
-                    }
-                },
+                modifier = Modifier.size(220.dp),
             )
 
             Text(
@@ -234,10 +381,64 @@ fun VoiceModeScreen(
                 text = statusSubtitle,
                 fontSize = 15.sp,
                 color = CoffeeText.copy(alpha = 0.55f),
-                modifier = Modifier.padding(top = 8.dp),
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 8.dp, start = 8.dp, end = 8.dp),
             )
 
-            val transcript = partial.ifBlank { final }
+            MicLevelIndicator(
+                level = if (phase == VoiceTalkPhase.Listening || phase == VoiceTalkPhase.Inactive) {
+                    micLevel
+                } else {
+                    0f
+                },
+                connected = micConnected,
+                visible = phase == VoiceTalkPhase.Listening || phase == VoiceTalkPhase.Inactive,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 20.dp, start = 32.dp, end = 32.dp),
+            )
+
+            if (SherpaVoiceConfig.useOnlineSttOnEmulator && !sessionActive) {
+                Text(
+                    text = "Emulator uses online speech recognition (needs internet). On a real phone, Whisper runs fully offline.",
+                    fontSize = 12.sp,
+                    color = CoffeeText.copy(alpha = 0.5f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 8.dp, start = 16.dp, end = 16.dp),
+                )
+            } else if (SherpaVoiceConfig.isX86Device && !sessionActive) {
+                Text(
+                    text = "Emulator audio: press Volume Up on the emulator, then in Windows Volume Mixer raise \"qemu-system-x86_64\" (Android Emulator).",
+                    fontSize = 12.sp,
+                    color = CoffeeText.copy(alpha = 0.5f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 8.dp, start = 16.dp, end = 16.dp),
+                )
+            }
+
+            if (!micConnected && !sessionActive) {
+                Text(
+                    text = if (micInputSilent) {
+                        "Emulator is sending silence (0%). Restart emulator with -allow-host-audio, then open ⋯ → Microphone → Host audio input."
+                    } else {
+                        "Speak into your mic — the bar should move above 5%. Emulator: ⋯ → Microphone → Host audio input."
+                    },
+                    fontSize = 13.sp,
+                    color = Error,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 10.dp, start = 16.dp, end = 16.dp),
+                )
+            } else if (micConnected && !sessionActive) {
+                Text(
+                    text = "Microphone working — tap Start when ready",
+                    fontSize = 13.sp,
+                    color = CoffeeBrown,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 10.dp),
+                )
+            }
+
+            val transcript = liveTranscript.ifBlank { partial }
             if (transcript.isNotBlank()) {
                 Text(
                     text = transcript,
@@ -262,52 +463,104 @@ fun VoiceModeScreen(
 
             Spacer(modifier = Modifier.weight(1f))
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 32.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                VoiceControlButton(
-                    icon = Icons.Default.Mic,
-                    background = CoffeeBrown,
-                    iconTint = Color.White,
-                    size = 56.dp,
+            if (sessionActive) {
+                val aiActive = phase == VoiceTalkPhase.Thinking ||
+                    phase == VoiceTalkPhase.Speaking ||
+                    isSpeaking ||
+                    chatState.isLoading
+                Button(
                     onClick = {
-                        if (isModelReady && !chatState.isLoading) {
-                            if (isSpeaking) {
-                                resumeListeningAfterTts = false
-                                tts.stop()
-                            }
-                            stt.startListening()
-                        }
+                        if (aiActive) interruptAiAndListen() else stopVoiceSession()
                     },
-                )
-                VoiceControlButton(
-                    icon = Icons.Default.Pause,
-                    background = Color(0xFFC47A45),
-                    iconTint = Color.White,
-                    size = 72.dp,
-                    onClick = {
-                        when {
-                            isSpeaking -> {
-                                resumeListeningAfterTts = false
-                                tts.stop()
-                            }
-                            isListening -> stt.stopListening()
-                            isModelReady && !chatState.isLoading -> stt.startListening()
-                        }
-                    },
-                )
-                VoiceControlButton(
-                    icon = Icons.Default.Close,
-                    background = CoffeeCreamDeep,
-                    iconTint = CoffeeBrown,
-                    size = 56.dp,
-                    onClick = ::exitVoice,
-                )
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 32.dp)
+                        .height(56.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFB84A3A),
+                        contentColor = Color.White,
+                    ),
+                    shape = RoundedCornerShape(28.dp),
+                ) {
+                    Icon(Icons.Default.Stop, contentDescription = null)
+                    Text(
+                        text = if (aiActive) "Stop AI" else "End session",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 10.dp),
+                    )
+                }
+            } else {
+                Button(
+                    onClick = ::startVoiceSession,
+                    enabled = isModelReady && !isModelLoading &&
+                        (micConnected || SherpaVoiceConfig.useOnlineSttOnEmulator) &&
+                        chatState.isEngineReady,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 32.dp)
+                        .height(56.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = CoffeeBrown,
+                        contentColor = Color.White,
+                        disabledContainerColor = CoffeeBrown.copy(alpha = 0.4f),
+                    ),
+                    shape = RoundedCornerShape(28.dp),
+                ) {
+                    Icon(Icons.Default.Mic, contentDescription = null)
+                    Text(
+                        text = "Start",
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 10.dp),
+                    )
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun MicLevelIndicator(
+    level: Float,
+    connected: Boolean,
+    visible: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    if (!visible) return
+    Column(modifier = modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Microphone",
+                fontSize = 13.sp,
+                color = CoffeeText.copy(alpha = 0.7f),
+            )
+            Text(
+                text = "${(level * 100).toInt()}%",
+                fontSize = 13.sp,
+                color = if (connected) CoffeeBrown else Error,
+                fontWeight = FontWeight.SemiBold,
+            )
+        }
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp)
+                .height(10.dp)
+                .clip(RoundedCornerShape(5.dp))
+                .background(CoffeeText.copy(alpha = 0.12f)),
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth(level.coerceIn(0.02f, 1f))
+                    .height(10.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(if (connected) CoffeeBrown else Error.copy(alpha = 0.5f)),
+            )
         }
     }
 }
@@ -354,30 +607,5 @@ private fun LetsTalkHeader(onBack: () -> Unit) {
                 fontWeight = FontWeight.SemiBold,
             )
         }
-    }
-}
-
-@Composable
-private fun VoiceControlButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    background: Color,
-    iconTint: Color,
-    size: androidx.compose.ui.unit.Dp,
-    onClick: () -> Unit,
-) {
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(CircleShape)
-            .background(background)
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = iconTint,
-            modifier = Modifier.size(size * 0.38f),
-        )
     }
 }

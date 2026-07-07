@@ -6,22 +6,52 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import com.personaledge.ai.homeDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/** User's coffee bean setup — CoffeeAI uses this to tune recipes and brew commands. */
 data class CoffeePreferences(
-    val favoriteDrink: String = "",
+    val beanName: String = "",
+    val beanType: String = "",
+    val origin: String = "",
     val roastLevel: String = "",
-    val brewMethod: String = "",
-    val milkPreference: String = "",
-    val strength: String = "",
+    val notes: String = "",
 ) {
+    val isConfigured: Boolean get() = beanName.isNotBlank()
+
     val summary: String
-        get() = favoriteDrink.ifBlank {
-            listOf(roastLevel, brewMethod).filter { it.isNotBlank() }.joinToString(" · ")
+        get() = listOf(beanName, roastLevel, beanType)
+            .filter { it.isNotBlank() }
+            .joinToString(" · ")
+
+    /** Structured block appended to machine brew commands for the AI backend. */
+    fun machineContextBlock(): String? {
+        if (!isConfigured && roastLevel.isBlank() && origin.isBlank()) return null
+        return buildString {
+            appendLine("[USER_BEANS]")
+            if (beanName.isNotBlank()) appendLine("name: $beanName")
+            if (beanType.isNotBlank()) appendLine("type: $beanType")
+            if (origin.isNotBlank()) appendLine("origin: $origin")
+            if (roastLevel.isNotBlank()) appendLine("roast: $roastLevel")
+            if (notes.isNotBlank()) appendLine("notes: $notes")
+        }.trimEnd()
+    }
+
+    /** Short line injected into offline memory so chat/voice always knows the user's beans. */
+    fun memoryChunk(): String? {
+        if (!isConfigured) return null
+        val parts = buildList {
+            add(beanName)
+            beanType.takeIf { it.isNotBlank() }?.let { add(it) }
+            roastLevel.takeIf { it.isNotBlank() }?.let { add("$it roast") }
+            origin.takeIf { it.isNotBlank() }?.let { add("from $it") }
         }
+        return "User brews with: ${parts.joinToString(", ")}." +
+            if (notes.isNotBlank()) " Notes: $notes." else ""
+    }
 }
 
 data class UserProfile(
@@ -55,11 +85,11 @@ class ProfileStore(private val context: Context) {
     private val nameKey = stringPreferencesKey("profile_display_name")
     private val emailKey = stringPreferencesKey("profile_email")
     private val avatarKey = stringPreferencesKey("profile_avatar_path")
-    private val drinkKey = stringPreferencesKey("profile_favorite_drink")
+    private val beanNameKey = stringPreferencesKey("profile_bean_name")
+    private val beanTypeKey = stringPreferencesKey("profile_bean_type")
+    private val beanOriginKey = stringPreferencesKey("profile_bean_origin")
     private val roastKey = stringPreferencesKey("profile_roast_level")
-    private val brewKey = stringPreferencesKey("profile_brew_method")
-    private val milkKey = stringPreferencesKey("profile_milk_preference")
-    private val strengthKey = stringPreferencesKey("profile_strength")
+    private val beanNotesKey = stringPreferencesKey("profile_bean_notes")
     private val memberSinceKey = longPreferencesKey("profile_member_since")
 
     val profile: Flow<UserProfile> = context.homeDataStore.data.map { prefs ->
@@ -68,15 +98,18 @@ class ProfileStore(private val context: Context) {
             email = prefs[emailKey].orEmpty(),
             avatarPath = prefs[avatarKey].orEmpty(),
             coffeePreferences = CoffeePreferences(
-                favoriteDrink = prefs[drinkKey].orEmpty(),
+                beanName = prefs[beanNameKey].orEmpty(),
+                beanType = prefs[beanTypeKey].orEmpty(),
+                origin = prefs[beanOriginKey].orEmpty(),
                 roastLevel = prefs[roastKey].orEmpty(),
-                brewMethod = prefs[brewKey].orEmpty(),
-                milkPreference = prefs[milkKey].orEmpty(),
-                strength = prefs[strengthKey].orEmpty(),
+                notes = prefs[beanNotesKey].orEmpty(),
             ),
             memberSinceMillis = prefs[memberSinceKey] ?: 0L,
         )
     }
+
+    suspend fun currentCoffeePreferences(): CoffeePreferences =
+        profile.first().coffeePreferences
 
     suspend fun savePersonalDetails(displayName: String, email: String, avatarPath: String) {
         context.homeDataStore.edit { prefs ->
@@ -94,11 +127,11 @@ class ProfileStore(private val context: Context) {
 
     suspend fun saveCoffeePreferences(preferences: CoffeePreferences) {
         context.homeDataStore.edit { prefs ->
-            prefs[drinkKey] = preferences.favoriteDrink
+            prefs[beanNameKey] = preferences.beanName.trim()
+            prefs[beanTypeKey] = preferences.beanType
+            prefs[beanOriginKey] = preferences.origin.trim()
             prefs[roastKey] = preferences.roastLevel
-            prefs[brewKey] = preferences.brewMethod
-            prefs[milkKey] = preferences.milkPreference
-            prefs[strengthKey] = preferences.strength
+            prefs[beanNotesKey] = preferences.notes.trim()
         }
     }
 }

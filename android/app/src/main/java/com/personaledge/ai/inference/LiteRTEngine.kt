@@ -85,9 +85,26 @@ class LiteRTEngine(
         return InferenceBackend.CPU
     }
 
+    companion object {
+        private val CHAT_SAMPLER = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.8)
+        private val VOICE_SAMPLER = SamplerConfig(topK = 12, topP = 0.85, temperature = 0.65)
+    }
+
     suspend fun startConversation(
         memoryContext: MemoryContext,
         history: List<ChatTurn> = emptyList(),
+    ) = startConversationInternal(memoryContext, history, PromptBuilder.buildSystemInstruction(memoryContext), CHAT_SAMPLER)
+
+    suspend fun startVoiceConversation(
+        memoryContext: MemoryContext,
+        history: List<ChatTurn> = emptyList(),
+    ) = startConversationInternal(memoryContext, history, PromptBuilder.buildVoiceSystemInstruction(memoryContext), VOICE_SAMPLER)
+
+    private suspend fun startConversationInternal(
+        memoryContext: MemoryContext,
+        history: List<ChatTurn>,
+        systemInstruction: String,
+        sampler: SamplerConfig,
     ) = withContext(Dispatchers.IO) {
         conversation?.close()
         val eng = engine ?: error("Engine not loaded")
@@ -100,12 +117,14 @@ class LiteRTEngine(
         }
         conversation = eng.createConversation(
             ConversationConfig(
-                systemInstruction = Contents.of(PromptBuilder.buildSystemInstruction(memoryContext)),
+                systemInstruction = Contents.of(systemInstruction),
                 initialMessages = initialMessages,
-                samplerConfig = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.8),
+                samplerConfig = sampler,
             ),
         )
     }
+
+    fun hasActiveConversation(): Boolean = conversation != null
 
     fun sendMessageStreaming(text: String): Flow<String> {
         val conv = conversation ?: error("Conversation not started")

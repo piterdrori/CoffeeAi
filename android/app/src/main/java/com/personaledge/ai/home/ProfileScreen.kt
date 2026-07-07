@@ -71,11 +71,9 @@ import com.personaledge.ai.ui.theme.CoffeeCream
 import com.personaledge.ai.ui.theme.CoffeeText
 import java.io.File
 
-private val drinkChoices = listOf("", "Espresso", "Latte", "Cappuccino", "Flat White", "Americano", "Cold Brew", "Pour-over", "Other")
-private val roastChoices = listOf("", "Light", "Medium", "Dark")
-private val brewChoices = listOf("", "Espresso machine", "French press", "Pour-over", "AeroPress", "Moka pot", "Instant")
-private val milkChoices = listOf("", "None", "Dairy", "Oat", "Almond", "Soy")
-private val strengthChoices = listOf("", "Mild", "Regular", "Strong", "Decaf")
+private val beanTypeChoices = listOf("", "Arabica", "Robusta", "Blend", "Single origin", "Decaf", "Other")
+private val roastChoices = listOf("", "Light", "Medium", "Medium-dark", "Dark")
+private val originChoices = listOf("", "Colombia", "Ethiopia", "Brazil", "Kenya", "Guatemala", "Italy (blend)", "Other")
 
 @Composable
 fun ProfileScreen(
@@ -236,8 +234,10 @@ fun ProfileScreen(
             )
             ProfileMenuRow(
                 icon = Icons.Default.LocalCafe,
-                title = "Coffee Preferences",
-                subtitle = state.profile.coffeePreferences.favoriteDrink.ifBlank { "Drink, roast, brew & milk" },
+                title = "My Coffee Beans",
+                subtitle = state.profile.coffeePreferences.summary.ifBlank {
+                    "Add your beans so CoffeeAI can tune recipes"
+                },
                 onClick = { showCoffeeDialog = true },
             )
             ProfileMenuRow(
@@ -511,60 +511,77 @@ private fun CoffeePreferencesDialog(
     onDismiss: () -> Unit,
     onSave: (CoffeePreferences) -> Unit,
 ) {
-    val presetDrinks = drinkChoices.drop(1).filter { it != "Other" }
-    var drink by remember(preferences) {
+    var beanName by remember(preferences) { mutableStateOf(preferences.beanName) }
+    var beanType by remember(preferences) { mutableStateOf(preferences.beanType) }
+    var origin by remember(preferences) {
         mutableStateOf(
             when {
-                preferences.favoriteDrink in presetDrinks -> preferences.favoriteDrink
-                preferences.favoriteDrink.isNotBlank() -> "Other"
+                preferences.origin in originChoices.drop(1) -> preferences.origin
+                preferences.origin.isNotBlank() -> "Other"
                 else -> ""
             },
         )
     }
-    var customDrink by remember(preferences) {
+    var customOrigin by remember(preferences) {
         mutableStateOf(
-            if (preferences.favoriteDrink !in presetDrinks && preferences.favoriteDrink.isNotBlank()) {
-                preferences.favoriteDrink
+            if (preferences.origin !in originChoices.drop(1) && preferences.origin.isNotBlank()) {
+                preferences.origin
             } else {
                 ""
             },
         )
     }
     var roast by remember(preferences) { mutableStateOf(preferences.roastLevel) }
-    var brew by remember(preferences) { mutableStateOf(preferences.brewMethod) }
-    var milk by remember(preferences) { mutableStateOf(preferences.milkPreference) }
-    var strength by remember(preferences) { mutableStateOf(preferences.strength) }
+    var notes by remember(preferences) { mutableStateOf(preferences.notes) }
 
-    val resolvedDrink = if (drink == "Other") customDrink.trim() else drink
-    val canSave = drink.isNotBlank() && (drink != "Other" || customDrink.isNotBlank())
+    val resolvedOrigin = if (origin == "Other") customOrigin.trim() else origin
+    val canSave = beanName.isNotBlank()
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Coffee Preferences", fontWeight = FontWeight.Bold, color = CoffeeText) },
+        title = { Text("My Coffee Beans", fontWeight = FontWeight.Bold, color = CoffeeText) },
         text = {
             ProfileFormTheme {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("CoffeeAI uses these to tailor recipes and tips.", fontSize = 13.sp, color = CoffeeText.copy(alpha = 0.65f))
-                    PreferenceDropdown("Go-to drink", drink, drinkChoices.drop(1)) { selected ->
-                        drink = selected
-                        if (selected != "Other") customDrink = ""
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        "CoffeeAI adjusts your brew recipes to match these beans.",
+                        fontSize = 13.sp,
+                        color = CoffeeText.copy(alpha = 0.65f),
+                    )
+                    ProfileLabeledField(label = "Bean name or brand") {
+                        CoffeeProfileTextField(
+                            value = beanName,
+                            onValueChange = { beanName = it },
+                            placeholder = "e.g. Lavazza Qualità Oro, Ethiopian Yirgacheffe",
+                        )
                     }
-                    if (drink == "Other") {
-                        ProfileLabeledField(label = "Your favorite drink") {
-                            OutlinedTextField(
-                                value = customDrink,
-                                onValueChange = { customDrink = it },
-                                placeholder = { Text("e.g. Cortado, Turkish coffee, Affogato") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = profileFieldColors(),
+                    PreferenceDropdown("Bean type", beanType, beanTypeChoices.drop(1)) { beanType = it }
+                    PreferenceDropdown("Origin", origin, originChoices.drop(1)) { selected ->
+                        origin = selected
+                        if (selected != "Other") customOrigin = ""
+                    }
+                    if (origin == "Other") {
+                        ProfileLabeledField(label = "Origin (custom)") {
+                            CoffeeProfileTextField(
+                                value = customOrigin,
+                                onValueChange = { customOrigin = it },
+                                placeholder = "e.g. Sumatra, Nicaragua",
                             )
                         }
                     }
-                    PreferenceDropdown("Roast level", roast, roastChoices.drop(1), { roast = it })
-                    PreferenceDropdown("Brew method", brew, brewChoices.drop(1), { brew = it })
-                    PreferenceDropdown("Milk preference", milk, milkChoices.drop(1), { milk = it })
-                    PreferenceDropdown("Strength", strength, strengthChoices.drop(1), { strength = it })
+                    PreferenceDropdown("Roast level", roast, roastChoices.drop(1)) { roast = it }
+                    ProfileLabeledField(label = "Tasting notes (optional)") {
+                        CoffeeProfileTextField(
+                            value = notes,
+                            onValueChange = { notes = it },
+                            placeholder = "e.g. nutty, chocolate, medium body",
+                            singleLine = false,
+                            minLines = 2,
+                        )
+                    }
                 }
             }
         },
@@ -573,17 +590,17 @@ private fun CoffeePreferencesDialog(
                 onClick = {
                     onSave(
                         CoffeePreferences(
-                            favoriteDrink = resolvedDrink,
+                            beanName = beanName.trim(),
+                            beanType = beanType,
+                            origin = resolvedOrigin,
                             roastLevel = roast,
-                            brewMethod = brew,
-                            milkPreference = milk,
-                            strength = strength,
+                            notes = notes.trim(),
                         ),
                     )
                 },
                 enabled = canSave,
                 colors = profilePrimaryButtonColors(),
-            ) { Text("Save") }
+            ) { Text("Save", color = Color.White) }
         },
         dismissButton = {
             TextButton(onClick = onDismiss) { Text("Cancel", color = CoffeeBrown) }
@@ -607,7 +624,7 @@ private fun PreferenceDropdown(
                 value = value.ifBlank { "" },
                 onValueChange = {},
                 readOnly = true,
-                placeholder = { Text("Select…") },
+                placeholder = { Text("Select…", color = CoffeeText.copy(alpha = 0.55f)) },
                 trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
                 modifier = Modifier.menuAnchor().fillMaxWidth(),
                 colors = profileDropdownMenuColors(),

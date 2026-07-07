@@ -55,15 +55,27 @@ if (Test-Path "C:\Windows\System32\ASProxy64.dll") {
 }
 
 $voiceScript = Join-Path $Root "scripts\fetch-bundled-voice-models.ps1"
+$whisperScript = Join-Path $Root "scripts\fetch-whisper-stt.ps1"
+if (Test-Path $whisperScript) {
+    Write-Host "==> Ensuring whisper.cpp source + base.en STT model..." -ForegroundColor Cyan
+    try {
+        & $whisperScript
+    } catch {
+        if (-not (Test-Path (Join-Path $Root "android\app\src\main\assets\voice\stt\ggml-base.en.bin"))) {
+            throw "Whisper STT model missing. Run .\scripts\fetch-whisper-stt.ps1`n$($_.Exception.Message)"
+        }
+        Write-Warning "Could not refresh Whisper STT (using existing files): $($_.Exception.Message)"
+    }
+}
 if (Test-Path $voiceScript) {
-    Write-Host "==> Ensuring bundled STT/TTS models in APK assets..." -ForegroundColor Cyan
+    Write-Host "==> Ensuring bundled TTS model in APK assets..." -ForegroundColor Cyan
     try {
         & $voiceScript
     } catch {
-        if (-not (Test-Path (Join-Path $Root "android\app\src\main\assets\voice\stt"))) {
-            throw "Bundled voice models missing. Run .\scripts\fetch-bundled-voice-models.ps1`n$($_.Exception.Message)"
+        if (-not (Test-Path (Join-Path $Root "android\app\src\main\assets\voice\tts"))) {
+            throw "Bundled TTS model missing. Run .\scripts\fetch-bundled-voice-models.ps1`n$($_.Exception.Message)"
         }
-        Write-Warning "Could not refresh voice models (using existing files): $($_.Exception.Message)"
+        Write-Warning "Could not refresh TTS model (using existing files): $($_.Exception.Message)"
     }
 }
 
@@ -131,7 +143,7 @@ $gh = Get-Command gh -ErrorAction SilentlyContinue
 if (-not $gh) {
     Write-Warning "GitHub CLI (gh) not found — skipping cloud upload. Install: winget install GitHub.cli"
 } else {
-    $releaseNotes = "CoffeeAI $version — improved speech recognition, TTS crash fixes, faster chat, model install reliability."
+    $releaseNotes = "CoffeeAI $version — Favorite Beverages, custom recipes, coffee bean profile for AI tuning, voice UX fixes, and UI readability improvements."
     $view = & gh release view $tag --repo $githubRepo 2>&1
     if ($LASTEXITCODE -ne 0) {
         & gh release create $tag --repo $githubRepo --title "CoffeeAI $version" --notes $releaseNotes $ApkDest
@@ -158,7 +170,7 @@ $appMeta = @{
     apk_filename   = "personal-edge-ai.apk"
     apk_size_bytes = $size
     download_url   = $downloadUrl
-    notes          = "CoffeeAI v$version - improved STT, TTS stability, faster chat"
+    notes          = "CoffeeAI v$version - Favorite Beverages, custom recipes, coffee bean profile, voice and UI fixes"
 }
 $appMeta | ConvertTo-Json | Set-Content -Path $appVersionPath -Encoding UTF8
 

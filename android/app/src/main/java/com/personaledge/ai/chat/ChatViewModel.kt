@@ -5,6 +5,9 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.personaledge.ai.EdgeAiApplication
+import com.personaledge.ai.coffee.BrewState
+import com.personaledge.ai.coffee.BrewStatus
+import com.personaledge.ai.coffee.MachineCommand
 import com.personaledge.ai.inference.ChatTurn
 import com.personaledge.ai.inference.InferenceBackend
 import com.personaledge.ai.inference.MemoryContext
@@ -18,6 +21,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
@@ -53,9 +58,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val engine = LiteRTEngine(application)
 
     private var currentSessionId: String? = null
+    private var sendJob: Job? = null
+    private var machineCommandJob: Job? = null
+    private var voiceSessionActive = false
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
+
+    private val _brewState = MutableStateFlow(BrewState())
+    val brewState: StateFlow<BrewState> = _brewState.asStateFlow()
 
     val activeSessionId: String? get() = currentSessionId
 
@@ -74,11 +85,19 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     suspend fun prepareNewSession(sessionId: String = UUID.randomUUID().toString()): String {
-        currentSessionId = sessionId
+        sessionStore.deleteSessionsWithoutMessages()
+        val draft = sessionStore.findDraftSession()
+        val id = draft?.id ?: sessionId
+        currentSessionId = id
+        clearChatInternal()
+        return id
+    }
+
+    private suspend fun ensureSessionInStore() {
+        val sessionId = currentSessionId ?: return
+        if (sessionStore.getSession(sessionId) != null) return
         val accent = sessionId.hashCode().mod(4).let { if (it < 0) -it else it }
         sessionStore.createSession(sessionId, "New Chat", "", accent)
-        clearChatInternal()
-        return sessionId
     }
 
     fun persistSession() {
@@ -101,6 +120,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun persistCurrentSession() {
         val sessionId = currentSessionId ?: return
         val messages = _uiState.value.messages.filter { !it.isStreaming }
+        if (messages.isEmpty()) {
+            sessionStore.deleteSession(sessionId)
+            return
+        }
+        ensureSessionInStore()
         sessionStore.saveMessages(sessionId, messages)
         val firstUser = messages.firstOrNull { it.role == "user" && it.content.isNotBlank() }?.content?.trim()
         val title = firstUser?.let { snippet ->
@@ -290,46 +314,176 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(pendingImagePath = null, pendingImageUri = null) }
     }
 
+    fun cancelResponse() {
+        sendJob?.cancel()
+        sendJob = null
+        _uiState.update { state ->
+            val trimmed = state.messages.toMutableList()
+            if (trimmed.lastOrNull()?.role == "assistant" &&
+                trimmed.last().content.isBlank()
+            ) {
+                trimmed.removeAt(trimmed.lastIndex)
+            }
+            state.copy(
+                isLoading = false,
+                orbState = OrbState.Idle,
+                error = null,
+                messages = trimmed.map { msg ->
+                    if (msg.isStreaming) msg.copy(isStreaming = false) else msg
+                },
+            )
+        }
+    }
+
+    fun beginVoiceSession() {
+        viewModelScope.launch {
+            if (!_uiState.value.isEngineReady) {
+                loadActiveModelInternal()
+            }
+            if (!_uiState.value.isEngineReady) return@launch
+            val memory = syncClient.offlineContext()
+            val history = _uiState.value.messages
+                .filter { !it.isStreaming }
+                .map { ChatTurn(it.role, it.content) }
+            engine.startVoiceConversation(memory, history)
+            voiceSessionActive = true
+        }
+    }
+
+    fun endVoiceSession() {
+        voiceSessionActive = false
+    }
+
+    fun sendVoiceMessage() {
+        val text = _uiState.value.inputText.trim()
+        if (text.isBlank() || _uiState.value.isLoading) return
+
+        sendJob?.cancel()
+        sendJob = viewModelScope.launch {
+            try {
+                ensureSessionInStore()
+                if (!_uiState.value.isEngineReady) {
+                    loadActiveModelInternal()
+                    if (!_uiState.value.isEngineReady) {
+                        val err = _uiState.value.error ?: "CoffeeAI is still starting up. Please wait a moment."
+                        _uiState.update {
+                            it.copy(
+                                inputText = "",
+                                messages = it.messages + UiMessage("user", text) +
+                                    UiMessage("assistant", err),
+                            )
+                        }
+                        return@launch
+                    }
+                }
+
+                _uiState.update {
+                    it.copy(
+                        inputText = "",
+                        isLoading = true,
+                        orbState = OrbState.Thinking,
+                        messages = it.messages + UiMessage("user", text),
+                        error = null,
+                    )
+                }
+
+                if (!voiceSessionActive || !engine.hasActiveConversation()) {
+                    val memory = syncClient.offlineContext()
+                    val history = _uiState.value.messages
+                        .filter { !it.isStreaming }
+                        .dropLast(1)
+                        .map { ChatTurn(it.role, it.content) }
+                    engine.startVoiceConversation(memory, history)
+                    voiceSessionActive = true
+                }
+
+                val streamingIndex = _uiState.value.messages.size
+                _uiState.update {
+                    it.copy(messages = it.messages + UiMessage("assistant", "", isStreaming = true))
+                }
+
+                val responseBuilder = StringBuilder()
+                engine.sendMessageStreaming(text).collect { token ->
+                    responseBuilder.append(token)
+                    _uiState.update { state ->
+                        val updated = state.messages.toMutableList()
+                        if (streamingIndex < updated.size) {
+                            updated[streamingIndex] = UiMessage(
+                                "assistant",
+                                responseBuilder.toString(),
+                                isStreaming = true,
+                            )
+                        }
+                        state.copy(messages = updated, orbState = OrbState.Thinking)
+                    }
+                }
+
+                val finalResponse = responseBuilder.toString()
+                _uiState.update { state ->
+                    val updated = state.messages.toMutableList()
+                    if (streamingIndex < updated.size) {
+                        updated[streamingIndex] = UiMessage("assistant", finalResponse)
+                    }
+                    state.copy(messages = updated, isLoading = false, orbState = OrbState.Idle)
+                }
+                viewModelScope.launch { syncClient.syncTurn(text, finalResponse) }
+                persistCurrentSession()
+            } catch (_: CancellationException) {
+                // barge-in or stop
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        orbState = OrbState.Idle,
+                        error = e.message ?: "Generation failed",
+                    )
+                }
+            }
+        }
+    }
+
     fun sendMessage() {
         val text = _uiState.value.inputText.trim()
         val imagePath = _uiState.value.pendingImagePath
         if ((text.isBlank() && imagePath == null) || _uiState.value.isLoading) return
         val prompt = text.ifBlank { "Describe this image." }
 
-        viewModelScope.launch {
-            if (!_uiState.value.isEngineReady) {
-                loadActiveModelInternal()
-                if (!_uiState.value.isEngineReady) {
-                    val err = _uiState.value.error ?: "CoffeeAI is still starting up. Please wait a moment."
-                    _uiState.update {
-                        it.copy(
-                            inputText = "",
-                            messages = it.messages + UiMessage("user", prompt, imageUri = it.pendingImageUri) +
-                                UiMessage("assistant", err),
-                            pendingImagePath = null,
-                            pendingImageUri = null,
-                        )
-                    }
-                    return@launch
-                }
-            }
-
-            _uiState.update {
-                it.copy(
-                    inputText = "",
-                    isLoading = true,
-                    orbState = OrbState.Thinking,
-                    messages = it.messages + UiMessage(
-                        "user",
-                        prompt,
-                        imageUri = it.pendingImageUri,
-                    ),
-                    error = null,
-                    pendingImagePath = null,
-                    pendingImageUri = null,
-                )
-            }
+        sendJob?.cancel()
+        sendJob = viewModelScope.launch {
             try {
+                ensureSessionInStore()
+                if (!_uiState.value.isEngineReady) {
+                    loadActiveModelInternal()
+                    if (!_uiState.value.isEngineReady) {
+                        val err = _uiState.value.error ?: "CoffeeAI is still starting up. Please wait a moment."
+                        _uiState.update {
+                            it.copy(
+                                inputText = "",
+                                messages = it.messages + UiMessage("user", prompt, imageUri = it.pendingImageUri) +
+                                    UiMessage("assistant", err),
+                                pendingImagePath = null,
+                                pendingImageUri = null,
+                            )
+                        }
+                        return@launch
+                    }
+                }
+
+                _uiState.update {
+                    it.copy(
+                        inputText = "",
+                        isLoading = true,
+                        orbState = OrbState.Thinking,
+                        messages = it.messages + UiMessage(
+                            "user",
+                            prompt,
+                            imageUri = it.pendingImageUri,
+                        ),
+                        error = null,
+                        pendingImagePath = null,
+                        pendingImageUri = null,
+                    )
+                }
                 val memory = syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
                 _uiState.update { it.copy(memoryConnected = memory.memoryChunks.isNotEmpty()) }
                 val history = _uiState.value.messages
@@ -374,6 +528,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 viewModelScope.launch { syncClient.syncTurn(prompt, finalResponse) }
                 persistCurrentSession()
+            } catch (_: CancellationException) {
+                // barge-in or stop — state already handled by cancelResponse()
             } catch (e: Exception) {
                 _uiState.update {
                     it.copy(
@@ -391,13 +547,109 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         sendMessage()
     }
 
+    fun cancelMachineCommand() {
+        machineCommandJob?.cancel()
+        machineCommandJob = null
+        _brewState.value = BrewState()
+    }
+
+    suspend fun executeMachineCommand(command: MachineCommand, sessionId: String? = null) {
+        if (sessionId != null) {
+            currentSessionId = sessionId
+        } else if (currentSessionId == null) {
+            prepareNewSession()
+        }
+        val displayName = command.displayName
+        _brewState.value = BrewState(BrewStatus.Preparing, displayName)
+        val prompt = command.toMessage()
+
+        machineCommandJob?.cancel()
+        machineCommandJob = viewModelScope.launch {
+            try {
+                ensureSessionInStore()
+                if (!_uiState.value.isEngineReady) {
+                    loadActiveModelInternal()
+                }
+                _brewState.value = BrewState(BrewStatus.Brewing, displayName)
+                _uiState.update {
+                    it.copy(
+                        isLoading = true,
+                        messages = it.messages + UiMessage("user", prompt),
+                        error = null,
+                    )
+                }
+                val memory = syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
+                val history = _uiState.value.messages
+                    .filter { !it.isStreaming }
+                    .dropLast(1)
+                    .map { ChatTurn(it.role, it.content) }
+                if (engine.isLoaded) {
+                    engine.startConversation(memory, history)
+                }
+
+                val streamingIndex = _uiState.value.messages.size
+                _uiState.update {
+                    it.copy(messages = it.messages + UiMessage("assistant", "", isStreaming = true))
+                }
+
+                val responseBuilder = StringBuilder()
+                if (engine.isLoaded) {
+                    engine.sendMessageStreaming(prompt).collect { token ->
+                        responseBuilder.append(token)
+                        _uiState.update { state ->
+                            val updated = state.messages.toMutableList()
+                            if (streamingIndex < updated.size) {
+                                updated[streamingIndex] = UiMessage(
+                                    "assistant",
+                                    responseBuilder.toString(),
+                                    isStreaming = true,
+                                )
+                            }
+                            state.copy(messages = updated)
+                        }
+                    }
+                } else {
+                    responseBuilder.append("CoffeeAI is starting up. Your command has been queued.")
+                }
+
+                val finalResponse = responseBuilder.toString()
+                _uiState.update { state ->
+                    val updated = state.messages.toMutableList()
+                    if (streamingIndex < updated.size) {
+                        updated[streamingIndex] = UiMessage("assistant", finalResponse)
+                    }
+                    state.copy(messages = updated, isLoading = false)
+                }
+                viewModelScope.launch { syncClient.syncTurn(prompt, finalResponse) }
+                persistCurrentSession()
+                _brewState.value = BrewState(BrewStatus.Ready, displayName)
+            } catch (_: CancellationException) {
+                _brewState.value = BrewState()
+            } catch (e: Exception) {
+                _brewState.value = BrewState(
+                    BrewStatus.Error,
+                    displayName,
+                    e.message ?: "Command failed",
+                )
+                _uiState.update { it.copy(isLoading = false) }
+            }
+        }
+        machineCommandJob?.join()
+    }
+
     fun clearChat() {
         viewModelScope.launch { clearChatInternal() }
     }
 
     private suspend fun clearChatInternal() {
         _uiState.update { it.copy(messages = emptyList()) }
-        currentSessionId?.let { sessionStore.saveMessages(it, emptyList()) }
+        currentSessionId?.let { sessionId ->
+            if (!sessionStore.hasMessages(sessionId)) {
+                sessionStore.deleteSession(sessionId)
+            } else {
+                sessionStore.saveMessages(sessionId, emptyList())
+            }
+        }
         if (engine.isLoaded) {
             engine.startConversation(syncClient.offlineContext())
         }

@@ -9,6 +9,27 @@ import java.io.FileOutputStream
 object BundledAssetCopier {
     private const val TAG = "BundledAssetCopier"
 
+    fun ensureAssetFileOnDisk(context: Context, assetPath: String): String {
+        val target = File(context.filesDir, assetPath)
+        val marker = File(target.parentFile, "${target.name}.installed")
+        if (marker.exists() && target.exists() && target.length() > 0) {
+            return target.absolutePath
+        }
+        target.parentFile?.mkdirs()
+        copyAssetFile(context.assets, assetPath, target)
+        marker.writeText("ok")
+        Log.i(TAG, "Installed bundled asset to ${target.absolutePath}")
+        return target.absolutePath
+    }
+
+    fun hasAssetFile(assets: AssetManager, assetPath: String): Boolean {
+        return try {
+            assets.open(assetPath).use { it.available() > 0 }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     fun hasAssetDir(assets: AssetManager, assetPath: String): Boolean {
         return try {
             val children = assets.list(assetPath) ?: return false

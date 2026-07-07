@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.personaledge.ai.BuildConfig
+import com.personaledge.ai.home.ProfileStore
 import com.personaledge.ai.inference.MemoryContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -35,6 +36,7 @@ data class BackendConfig(
 class SyncClient(
     private val context: Context,
     private val database: MemoryDatabase,
+    private val profileStore: ProfileStore,
 ) {
     private val dao = database.memoryCacheDao()
     private val client = OkHttpClient.Builder()
@@ -240,10 +242,15 @@ class SyncClient(
 
     private suspend fun getOfflineContext(): MemoryContext {
         val cached = getCachedConfig()
+        val beanChunk = profileStore.currentCoffeePreferences().memoryChunk()
+        val memoryChunks = buildList {
+            if (beanChunk != null) add(beanChunk)
+            addAll(dao.getMemoryTexts())
+        }
         return MemoryContext(
             systemPrompt = cached?.systemPrompt ?: "You are a helpful personal assistant.",
             personalityRules = cached?.personalityRules.orEmpty(),
-            memoryChunks = dao.getMemoryTexts(),
+            memoryChunks = memoryChunks,
         )
     }
 

@@ -45,9 +45,12 @@ fun ProfileFormTheme(content: @Composable () -> Unit) {
     MaterialTheme(colorScheme = ProfileFormColorScheme, content = content)
 }
 
+@Composable
+fun profileFieldColors() = coffeeFieldColors()
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun profileFieldColors() = OutlinedTextFieldDefaults.colors(
+fun coffeeFieldColors() = OutlinedTextFieldDefaults.colors(
     focusedTextColor = CoffeeText,
     unfocusedTextColor = CoffeeText,
     disabledTextColor = CoffeeText.copy(alpha = 0.55f),
@@ -85,7 +88,10 @@ fun profileFieldColors() = OutlinedTextFieldDefaults.colors(
 )
 
 @Composable
-fun profilePrimaryButtonColors() = ButtonDefaults.buttonColors(
+fun profilePrimaryButtonColors() = coffeePrimaryButtonColors()
+
+@Composable
+fun coffeePrimaryButtonColors() = ButtonDefaults.buttonColors(
     containerColor = CoffeeBrown,
     contentColor = Color.White,
     disabledContainerColor = CoffeeBrown.copy(alpha = 0.45f),
@@ -114,7 +120,7 @@ fun profileDropdownMenuColors() = ExposedDropdownMenuDefaults.outlinedTextFieldC
 )
 
 @Composable
-internal fun ProfileLabeledField(
+fun ProfileLabeledField(
     label: String,
     content: @Composable () -> Unit,
 ) {
