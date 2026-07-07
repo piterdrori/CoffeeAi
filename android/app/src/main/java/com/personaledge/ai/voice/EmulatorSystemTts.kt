@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
+import android.speech.tts.Voice
 import android.util.Log
 import kotlinx.coroutines.suspendCancellableCoroutine
 import java.util.Locale
@@ -38,9 +39,10 @@ class EmulatorSystemTts(context: Context) {
                     return@TextToSpeech
                 }
                 engine.language = Locale.US
-                engine.setSpeechRate(0.95f)
-                engine.setPitch(1f)
-                Log.i(TAG, "System TTS ready")
+                selectNaturalVoice(engine)
+                engine.setSpeechRate(1.0f)
+                engine.setPitch(1.0f)
+                Log.i(TAG, "System TTS ready (voice=${engine.voice?.name})")
                 if (cont.isActive) cont.resume(true)
             }
         }
@@ -113,6 +115,29 @@ class EmulatorSystemTts(context: Context) {
             tts?.stop()
             tts?.shutdown()
             tts = null
+        }
+    }
+
+    /**
+     * The default TTS voice is often a low-quality "compact" voice that sounds robotic.
+     * Pick the highest-quality English voice available, preferring en-US and offline voices.
+     */
+    private fun selectNaturalVoice(engine: TextToSpeech) {
+        try {
+            val voices: Set<Voice> = engine.voices ?: return
+            val candidates = voices.filter { voice ->
+                voice.locale?.language == "en" &&
+                    voice.features?.contains(TextToSpeech.Engine.KEY_FEATURE_NOT_INSTALLED) != true
+            }
+            if (candidates.isEmpty()) return
+            val best = candidates.maxWithOrNull(
+                compareBy<Voice> { it.quality }
+                    .thenBy { if (it.isNetworkConnectionRequired) 0 else 1 }
+                    .thenBy { if (it.locale?.country == "US") 1 else 0 },
+            ) ?: return
+            engine.voice = best
+        } catch (e: Exception) {
+            Log.w(TAG, "Voice selection failed, using default: ${e.message}")
         }
     }
 

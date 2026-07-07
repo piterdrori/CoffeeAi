@@ -199,12 +199,26 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun loadActiveModelInternal() {
-        _uiState.update { it.copy(error = null, engineStatus = "Loading…") }
         val preferGpu = syncClient.getBackendConfig().useGpu
         val activeId = modelRepository.activeModelId.first()
         val primary = activeId?.let { ModelCatalog.findById(it) }
             ?: ModelCatalog.models.firstOrNull { modelRepository.isDownloaded(it) }
             ?: ModelCatalog.defaultModel()
+
+        // Engine already loaded and ready with this model — do NOT reload it.
+        // Reloading on every screen entry closed/reopened the engine and raced with the
+        // voice session start, which left the 2nd Let's Talk stuck on "Thinking".
+        if (engine.isLoaded && engine.loadedModelId() == primary.id && _uiState.value.isEngineReady) {
+            if (!engine.hasActiveConversation()) {
+                runCatching {
+                    val memory = syncClient.offlineContext()
+                    engine.startConversation(memory)
+                }
+            }
+            return
+        }
+
+        _uiState.update { it.copy(error = null, engineStatus = "Loading…") }
 
         if (primary.isBundled && !modelRepository.hasBundledAsset(primary)) {
             _uiState.update {

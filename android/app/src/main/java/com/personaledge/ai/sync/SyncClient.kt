@@ -104,7 +104,7 @@ class SyncClient(
             configObj?.let {
                 dao.saveConfig(
                     CachedConfigEntity(
-                        systemPrompt = it.optString("system_prompt", "You are a helpful personal assistant."),
+                        systemPrompt = it.optString("system_prompt", MemoryContext.DEFAULT_SYSTEM_PROMPT),
                         personalityRules = it.optString("personality_rules", ""),
                         tone = it.optString("tone", "friendly"),
                         lastSyncedAt = System.currentTimeMillis(),
@@ -125,7 +125,7 @@ class SyncClient(
             }
             return MemoryContext(
                 systemPrompt = configObj?.optString("system_prompt") ?: getCachedConfig()?.systemPrompt
-                    ?: "You are a helpful personal assistant.",
+                    ?: MemoryContext.DEFAULT_SYSTEM_PROMPT,
                 personalityRules = configObj?.optString("personality_rules")
                     ?: getCachedConfig()?.personalityRules.orEmpty(),
                 memoryChunks = chunks.ifEmpty { dao.getMemoryTexts() },
@@ -248,7 +248,7 @@ class SyncClient(
             addAll(dao.getMemoryTexts())
         }
         return MemoryContext(
-            systemPrompt = cached?.systemPrompt ?: "You are a helpful personal assistant.",
+            systemPrompt = cached?.systemPrompt ?: MemoryContext.DEFAULT_SYSTEM_PROMPT,
             personalityRules = cached?.personalityRules.orEmpty(),
             memoryChunks = memoryChunks,
         )

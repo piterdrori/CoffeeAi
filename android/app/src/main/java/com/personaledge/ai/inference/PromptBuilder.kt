@@ -1,10 +1,18 @@
 package com.personaledge.ai.inference
 
 data class MemoryContext(
-    val systemPrompt: String = "You are a helpful personal assistant.",
+    val systemPrompt: String = DEFAULT_SYSTEM_PROMPT,
     val personalityRules: String = "",
     val memoryChunks: List<String> = emptyList(),
-)
+) {
+    companion object {
+        /** Offline fallback only — the backend is the source of truth for personality and limits. */
+        const val DEFAULT_SYSTEM_PROMPT =
+            "You are CoffeeAI, the user's personal coffee expert and barista assistant. " +
+                "Communicate freely and give complete, helpful, accurate answers about coffee, " +
+                "recipes, brewing techniques, and operating their coffee machine."
+    }
+}
 
 data class ChatTurn(
     val role: String,
@@ -26,12 +34,14 @@ object PromptBuilder {
     }
 
     fun buildVoiceSystemInstruction(context: MemoryContext): String {
+        // No content or length limits here — the backend system prompt / rules control
+        // how much the assistant says. This only adapts delivery for spoken output so
+        // text-to-speech sounds natural (no markdown symbols read aloud).
         return buildSystemInstruction(context) + """
 
-            Voice conversation mode:
-            - Reply in 1–3 short spoken sentences (under 40 words total when possible).
-            - Use plain conversational language — no markdown, bullets, or code blocks.
-            - Get to the point immediately; skip preamble.
+            You are speaking out loud in a hands-free voice conversation. Reply in a
+            natural, conversational spoken style using plain sentences — no markdown,
+            bullet points, numbered lists, or code formatting.
         """.trimIndent()
     }
 }
