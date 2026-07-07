@@ -113,6 +113,7 @@ fun ChatScreen(
     LaunchedEffect(Unit) {
         autoTts = app.syncClient.getBackendConfig().autoTts
         tts.autoReadReplies = autoTts
+        viewModel.loadActiveModel()
     }
 
     LaunchedEffect(state.messages.lastOrNull()?.content, state.isLoading, autoTts) {

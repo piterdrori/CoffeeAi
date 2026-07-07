@@ -26,6 +26,27 @@ object SherpaVoiceConfig {
     /** x86 emulators run Whisper 10–20× slower than phones. */
     val isX86Device: Boolean = Build.SUPPORTED_ABIS.any { it.startsWith("x86") }
 
+    /** True on AVD / SDK images — not on physical handsets. */
+    val isEmulator: Boolean = run {
+        val fingerprint = Build.FINGERPRINT.lowercase()
+        val model = Build.MODEL.lowercase()
+        val hardware = Build.HARDWARE.lowercase()
+        val product = Build.PRODUCT.lowercase()
+        fingerprint.startsWith("generic") ||
+            fingerprint.contains("emulator") ||
+            fingerprint.contains("ranchu") ||
+            model.contains("google_sdk") ||
+            model.contains("emulator") ||
+            model.contains("android sdk built for x86") ||
+            hardware.contains("goldfish") ||
+            hardware.contains("ranchu") ||
+            product.contains("sdk_gphone") ||
+            product == "google_sdk" ||
+            product.contains("emulator")
+    }
+
+    val isPhysicalDevice: Boolean = !isEmulator
+
     /** Legacy fixed floor — real detection uses adaptive [ttsBleedFloor] while TTS plays. */
     val BARGE_IN_DURING_TTS_RMS: Float get() = if (isX86Device) 0.07f else 0.042f
     const val BARGE_IN_HOLD_MS = 450L
@@ -53,10 +74,10 @@ object SherpaVoiceConfig {
     const val TTS_BASELINE_FALL_RATE = 0.14f
     const val TTS_BASELINE_RISE_RATE = 0.02f
 
-    /** Whisper on emulator takes ~60s/utterance; use online Google STT for dev instead. */
-    val useOnlineSttOnEmulator: Boolean = isX86Device
+    /** Whisper on emulator is too slow; use online Google STT for dev instead. */
+    val useOnlineSttOnEmulator: Boolean = isEmulator
     /** Piper TTS often silent on emulator; use Android system TTS for audible PC output. */
-    val useSystemTtsOnEmulator: Boolean = isX86Device
+    val useSystemTtsOnEmulator: Boolean = isEmulator
     const val EMULATOR_STT_LABEL = "Google Speech (emulator — online)"
     const val EMULATOR_TTS_LABEL = "Android TTS (emulator)"
 

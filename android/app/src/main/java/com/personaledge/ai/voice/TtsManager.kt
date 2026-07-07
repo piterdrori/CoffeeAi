@@ -74,11 +74,15 @@ class TtsManager(context: Context) {
         try {
             val engine = EmulatorSystemTts(appContext)
             if (!engine.init()) {
-                _error.value = "Android TTS unavailable on this emulator"
+                _error.value = "Android text-to-speech is unavailable on this device"
                 return
             }
             emulatorTts = engine
-            _voiceLabel.value = SherpaVoiceConfig.EMULATOR_TTS_LABEL
+            _voiceLabel.value = if (SherpaVoiceConfig.useSystemTtsOnEmulator) {
+                SherpaVoiceConfig.EMULATOR_TTS_LABEL
+            } else {
+                "Android TTS (device)"
+            }
             _isReady.value = true
             Log.i(TAG, "Emulator system TTS ready")
         } catch (e: Exception) {
@@ -109,7 +113,13 @@ class TtsManager(context: Context) {
             _voiceLabel.value = SherpaVoiceConfig.TTS_LABEL
             _isReady.value = true
         } catch (e: Exception) {
-            _error.value = "Failed to load built-in TTS: ${e.message}"
+            Log.e(TAG, "Piper TTS init failed", e)
+            if (SherpaVoiceConfig.isPhysicalDevice) {
+                Log.w(TAG, "Falling back to Android system TTS on device")
+                initSystemTts()
+            } else {
+                _error.value = "Failed to load built-in TTS: ${e.message}"
+            }
         }
     }
 
@@ -119,9 +129,10 @@ class TtsManager(context: Context) {
             AudioFormat.CHANNEL_OUT_MONO,
             AudioFormat.ENCODING_PCM_FLOAT,
         )
+        val useMediaStream = SherpaVoiceConfig.isPhysicalDevice || SherpaVoiceConfig.isX86Device
         val attr = AudioAttributes.Builder()
             .setUsage(
-                if (SherpaVoiceConfig.isX86Device) {
+                if (useMediaStream) {
                     AudioAttributes.USAGE_MEDIA
                 } else {
                     AudioAttributes.USAGE_VOICE_COMMUNICATION
@@ -129,7 +140,7 @@ class TtsManager(context: Context) {
             )
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .setLegacyStreamType(
-                if (SherpaVoiceConfig.isX86Device) {
+                if (useMediaStream) {
                     AudioManager.STREAM_MUSIC
                 } else {
                     AudioManager.STREAM_VOICE_CALL
@@ -204,7 +215,7 @@ class TtsManager(context: Context) {
                 data = mapOf("chars" to cleaned.length, "emulator" to SherpaVoiceConfig.useSystemTtsOnEmulator),
             )
             // #endregion
-            if (SherpaVoiceConfig.useSystemTtsOnEmulator) {
+            if (SherpaVoiceConfig.useSystemTtsOnEmulator || emulatorTts != null) {
                 speakWithSystemTts(cleaned)
                 return@launch
             }

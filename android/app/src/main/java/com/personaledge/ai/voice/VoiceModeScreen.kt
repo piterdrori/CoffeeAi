@@ -99,6 +99,14 @@ fun VoiceModeScreen(
     var phase by remember { mutableStateOf(VoiceTalkPhase.Inactive) }
     var spokenChars by remember { mutableIntStateOf(0) }
     var liveTranscript by remember { mutableStateOf("") }
+    var hasMicPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val micReadyForStart = hasMicPermission &&
+        (SherpaVoiceConfig.isPhysicalDevice || micConnected || SherpaVoiceConfig.useOnlineSttOnEmulator)
 
     fun resumeListening() {
         phase = VoiceTalkPhase.Listening
@@ -209,6 +217,7 @@ fun VoiceModeScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { granted ->
+        hasMicPermission = granted
         if (granted) {
             stt.initModel()
             stt.startMicMonitor()
@@ -398,17 +407,13 @@ fun VoiceModeScreen(
                     .padding(top = 20.dp, start = 32.dp, end = 32.dp),
             )
 
-            if (SherpaVoiceConfig.useOnlineSttOnEmulator && !sessionActive) {
+            if (SherpaVoiceConfig.isEmulator && !sessionActive) {
                 Text(
-                    text = "Emulator uses online speech recognition (needs internet). On a real phone, Whisper runs fully offline.",
-                    fontSize = 12.sp,
-                    color = CoffeeText.copy(alpha = 0.5f),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 8.dp, start = 16.dp, end = 16.dp),
-                )
-            } else if (SherpaVoiceConfig.isX86Device && !sessionActive) {
-                Text(
-                    text = "Emulator audio: press Volume Up on the emulator, then in Windows Volume Mixer raise \"qemu-system-x86_64\" (Android Emulator).",
+                    text = if (SherpaVoiceConfig.useOnlineSttOnEmulator) {
+                        "Emulator uses online speech recognition (needs internet). On a real phone, Whisper runs fully offline."
+                    } else {
+                        "Emulator audio: press Volume Up on the emulator, then in Windows Volume Mixer raise \"qemu-system-x86_64\" (Android Emulator)."
+                    },
                     fontSize = 12.sp,
                     color = CoffeeText.copy(alpha = 0.5f),
                     textAlign = TextAlign.Center,
@@ -416,7 +421,15 @@ fun VoiceModeScreen(
                 )
             }
 
-            if (!micConnected && !sessionActive) {
+            if (!hasMicPermission && !sessionActive) {
+                Text(
+                    text = "Microphone permission is required for voice mode.",
+                    fontSize = 13.sp,
+                    color = Error,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 10.dp, start = 16.dp, end = 16.dp),
+                )
+            } else if (SherpaVoiceConfig.isEmulator && !micConnected && !sessionActive) {
                 Text(
                     text = if (micInputSilent) {
                         "Emulator is sending silence (0%). Restart emulator with -allow-host-audio, then open ⋯ → Microphone → Host audio input."
@@ -428,13 +441,17 @@ fun VoiceModeScreen(
                     textAlign = TextAlign.Center,
                     modifier = Modifier.padding(top = 10.dp, start = 16.dp, end = 16.dp),
                 )
-            } else if (micConnected && !sessionActive) {
+            } else if (hasMicPermission && !sessionActive) {
                 Text(
-                    text = "Microphone working — tap Start when ready",
+                    text = if (SherpaVoiceConfig.isPhysicalDevice) {
+                        "Tap Start, then speak — your phone mic and speaker are used offline."
+                    } else {
+                        "Microphone working — tap Start when ready"
+                    },
                     fontSize = 13.sp,
                     color = CoffeeBrown,
                     textAlign = TextAlign.Center,
-                    modifier = Modifier.padding(top = 10.dp),
+                    modifier = Modifier.padding(top = 10.dp, start = 16.dp, end = 16.dp),
                 )
             }
 
@@ -494,7 +511,7 @@ fun VoiceModeScreen(
                 Button(
                     onClick = ::startVoiceSession,
                     enabled = isModelReady && !isModelLoading &&
-                        (micConnected || SherpaVoiceConfig.useOnlineSttOnEmulator) &&
+                        micReadyForStart &&
                         chatState.isEngineReady,
                     modifier = Modifier
                         .fillMaxWidth()

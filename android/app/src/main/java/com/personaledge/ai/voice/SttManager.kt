@@ -148,6 +148,9 @@ class SttManager(context: Context) {
                         _micConnected.value = false
                         return@withLock
                     }
+                    if (SherpaVoiceConfig.isPhysicalDevice) {
+                        _micConnected.value = true
+                    }
                 }
                 monitorMicLevels()
             } catch (e: CancellationException) {
@@ -228,7 +231,9 @@ class SttManager(context: Context) {
                 }
                 _micInputSilent.value = silentReads >= 15
                 recentPeak = maxOf(recentPeak * 0.95f, rms)
-                _micConnected.value = recentPeak >= SherpaVoiceConfig.MIN_MIC_SIGNAL
+                if (!SherpaVoiceConfig.isPhysicalDevice) {
+                    _micConnected.value = recentPeak >= SherpaVoiceConfig.MIN_MIC_SIGNAL
+                }
                 delay(50)
             }
         }

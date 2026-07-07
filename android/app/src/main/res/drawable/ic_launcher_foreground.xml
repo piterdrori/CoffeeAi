@@ -7,36 +7,46 @@
     <!-- Steam -->
     <path
         android:fillColor="#00000000"
-        android:pathData="M42,41 C38,34 46,18 42,9"
-        android:strokeWidth="4.5"
+        android:pathData="M40,36 C36,28 44,16 40,8"
+        android:strokeWidth="4"
         android:strokeColor="#6F3C1E"
         android:strokeLineCap="round" />
     <path
         android:fillColor="#00000000"
-        android:pathData="M54,41 C50,34 58,18 54,9"
-        android:strokeWidth="4.5"
+        android:pathData="M54,36 C50,28 58,16 54,8"
+        android:strokeWidth="4"
         android:strokeColor="#6F3C1E"
         android:strokeLineCap="round" />
     <path
         android:fillColor="#00000000"
-        android:pathData="M66,41 C62,34 70,18 66,9"
+        android:pathData="M68,36 C64,28 72,16 68,8"
+        android:strokeWidth="4"
+        android:strokeColor="#6F3C1E"
+        android:strokeLineCap="round" />
+    <!-- Cup body -->
+    <path
+        android:fillColor="#6F3C1E"
+        android:pathData="M30,44 L78,44 C76,44 74,78 54,82 C34,78 32,44 30,44 Z" />
+    <!-- Coffee surface -->
+    <path
+        android:fillColor="#4A2A14"
+        android:pathData="M34,48 L74,48 C72,48 70,58 54,60 C38,58 36,48 34,48 Z" />
+    <!-- Cup rim -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M30,44 L78,44"
         android:strokeWidth="4.5"
         android:strokeColor="#6F3C1E"
         android:strokeLineCap="round" />
-    <!-- Waveform bars -->
+    <!-- Handle -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M78,48 C92,48 92,72 78,72"
+        android:strokeWidth="5"
+        android:strokeColor="#6F3C1E"
+        android:strokeLineCap="round" />
+    <!-- Saucer -->
     <path
         android:fillColor="#6F3C1E"
-        android:pathData="M30,69 h7 a3.5,3.5 0 0,1 0,-24 h-7 a3.5,3.5 0 0,1 0,24 z" />
-    <path
-        android:fillColor="#6F3C1E"
-        android:pathData="M41,69 h7 a3.5,3.5 0 0,1 0,-41 h-7 a3.5,3.5 0 0,1 0,41 z" />
-    <path
-        android:fillColor="#6F3C1E"
-        android:pathData="M52,69 h7 a3.5,3.5 0 0,1 0,-30 h-7 a3.5,3.5 0 0,1 0,30 z" />
-    <path
-        android:fillColor="#6F3C1E"
-        android:pathData="M63,69 h7 a3.5,3.5 0 0,1 0,-45 h-7 a3.5,3.5 0 0,1 0,45 z" />
-    <path
-        android:fillColor="#6F3C1E"
-        android:pathData="M74,69 h7 a3.5,3.5 0 0,1 0,-26 h-7 a3.5,3.5 0 0,1 0,26 z" />
+        android:pathData="M26,84 C26,80 82,80 82,84 C82,88 26,88 26,84 Z" />
 </vector>

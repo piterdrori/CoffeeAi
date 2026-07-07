@@ -43,6 +43,7 @@ object VoiceDebugLog {
                 cacheFile?.appendText(payload.toString() + "\n")
             } catch (_: Exception) {
             }
+            if (!SherpaVoiceConfig.isEmulator) return@launch
             try {
                 val conn = (URL(ENDPOINT).openConnection() as HttpURLConnection).apply {
                     requestMethod = "POST"
