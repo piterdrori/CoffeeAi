@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.4.6",
+    "version":  "1.4.7",
     "apk_filename":  "personal-edge-ai.apk",
-    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.6/personal-edge-ai.apk",
-    "notes":  "CoffeeAI v1.4.6 - no self-interruption, backend-only prompts, cleanup",
-    "apk_size_bytes":  1143110500,
-    "version_code":  11,
-    "updated_at":  "2026-07-07T11:11:47.4669629Z"
+    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.7/personal-edge-ai.apk",
+    "notes":  "CoffeeAI v1.4.7 - fixes empty replies and Thinking hangs, adds watchdog",
+    "apk_size_bytes":  1143126884,
+    "version_code":  12,
+    "updated_at":  "2026-07-07T22:51:32.6860634Z"
 }
