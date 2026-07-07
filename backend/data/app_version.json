@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.4.1",
+    "version":  "1.4.2",
     "apk_filename":  "personal-edge-ai.apk",
-    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.1/personal-edge-ai.apk",
-    "notes":  "CoffeeAI v1.4.1 - phone voice fixes, device TTS routing, coffee cup icon",
+    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.2/personal-edge-ai.apk",
+    "notes":  "CoffeeAI v1.4.2 - chat crash fix, Google Speech STT, fast TTS, lower latency",
     "apk_size_bytes":  1143110500,
-    "version_code":  6,
-    "updated_at":  "2026-07-07T07:11:34.6332675Z"
+    "version_code":  7,
+    "updated_at":  "2026-07-07T08:02:48.5463422Z"
 }
