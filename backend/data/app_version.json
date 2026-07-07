@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.4.3",
+    "version":  "1.4.4",
     "apk_filename":  "personal-edge-ai.apk",
-    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.3/personal-edge-ai.apk",
-    "notes":  "CoffeeAI v1.4.3 - Let\u0027s Talk barge-in fix, smoother voice replies",
-    "apk_size_bytes":  1143110496,
-    "version_code":  8,
-    "updated_at":  "2026-07-07T08:51:38.3899181Z"
+    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.4/personal-edge-ai.apk",
+    "notes":  "CoffeeAI v1.4.4 - free LLM via backend, 2nd voice session fix, natural TTS voice",
+    "apk_size_bytes":  1143321168,
+    "version_code":  9,
+    "updated_at":  "2026-07-07T09:45:06.2189281Z"
 }
