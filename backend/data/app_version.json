@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.4",
+    "version":  "1.4.1",
     "apk_filename":  "personal-edge-ai.apk",
-    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4/personal-edge-ai.apk",
-    "notes":  "CoffeeAI v1.4 - Favorite Beverages, custom recipes, coffee bean profile, voice and UI fixes",
-    "apk_size_bytes":  1143110436,
-    "version_code":  5,
-    "updated_at":  "2026-07-07T05:18:33.2780226Z"
+    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.1/personal-edge-ai.apk",
+    "notes":  "CoffeeAI v1.4.1 - phone voice fixes, device TTS routing, coffee cup icon",
+    "apk_size_bytes":  1143110500,
+    "version_code":  6,
+    "updated_at":  "2026-07-07T07:11:34.6332675Z"
 }
