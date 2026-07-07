@@ -84,8 +84,12 @@ object SherpaVoiceConfig {
     val useOnlineStt: Boolean = isEmulator || isPhysicalDevice
     /** @deprecated Use [useOnlineStt] */
     val useOnlineSttOnEmulator: Boolean get() = useOnlineStt
-    /** Android system TTS — low latency on real phones and emulators. */
-    val useSystemTts: Boolean = isEmulator || isPhysicalDevice
+    /**
+     * Only the emulator forces Android system TTS (Piper audio is unreliable on x86 hosts).
+     * Real phones use the bundled Piper neural voice for far more natural speech, with the
+     * system TTS engine kept only as an automatic fallback if Piper fails to load.
+     */
+    val useSystemTts: Boolean = isEmulator
     /** @deprecated Use [useSystemTts] */
     val useSystemTtsOnEmulator: Boolean get() = useSystemTts
     const val ONLINE_STT_LABEL = "Google Speech"

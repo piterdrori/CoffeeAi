@@ -67,6 +67,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         const val STREAM_UI_THROTTLE_MS = 80L
     }
 
+    private fun cleanReply(text: String): String =
+        text
+            .replace(Regex("```[\\s\\S]*?```"), "")
+            .replace("*", "")
+            .replace("`", "")
+            .replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")
+            .replace(Regex("(?m)^\\s*[-•]\\s+"), "")
+
     private fun appendStreamingToken(
         streamingIndex: Int,
         responseBuilder: StringBuilder,
@@ -83,7 +91,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val updated = state.messages.toMutableList()
             if (streamingIndex < updated.size) {
                 updated[streamingIndex] = updated[streamingIndex].copy(
-                    content = responseBuilder.toString(),
+                    content = cleanReply(responseBuilder.toString()),
                     isStreaming = true,
                 )
             }
@@ -104,7 +112,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             val updated = state.messages.toMutableList()
             if (streamingIndex < updated.size) {
                 updated[streamingIndex] = updated[streamingIndex].copy(
-                    content = finalResponse,
+                    content = cleanReply(finalResponse),
                     isStreaming = false,
                 )
             }

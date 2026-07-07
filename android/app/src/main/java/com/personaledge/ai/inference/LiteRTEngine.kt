@@ -86,8 +86,11 @@ class LiteRTEngine(
     }
 
     companion object {
-        private val CHAT_SAMPLER = SamplerConfig(topK = 40, topP = 0.95, temperature = 0.8)
-        private val VOICE_SAMPLER = SamplerConfig(topK = 12, topP = 0.85, temperature = 0.65)
+        // Balanced sampling for natural, varied prose. Low topK (e.g. 12) tended to make the
+        // small model loop and repeat phrases ("an exception – an exception"); a wider topK
+        // with moderate temperature reads more naturally and human.
+        private val CHAT_SAMPLER = SamplerConfig(topK = 64, topP = 0.9, temperature = 0.75)
+        private val VOICE_SAMPLER = SamplerConfig(topK = 64, topP = 0.9, temperature = 0.7)
     }
 
     suspend fun startConversation(

@@ -194,8 +194,10 @@ class TtsManager(context: Context) {
     fun speak(text: String) {
         if (released || !_isReady.value || text.isBlank()) return
         val cleaned = text
-            .replace(Regex("```[\\s\\S]*?```"), " code block ")
-            .replace(Regex("\\*\\*|__"), "")
+            .replace(Regex("```[\\s\\S]*?```"), " ")
+            .replace("*", "")
+            .replace("`", "")
+            .replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")
             .replace(Regex("\\s+"), " ")
             .trim()
         if (cleaned.isBlank()) return
