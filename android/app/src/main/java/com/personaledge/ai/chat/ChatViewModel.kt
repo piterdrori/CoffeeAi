@@ -17,6 +17,7 @@ import com.personaledge.ai.models.ModelEntry
 import com.personaledge.ai.ui.components.OrbState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
@@ -65,6 +67,40 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val STREAM_UI_THROTTLE_MS = 80L
+        // Safety net so a stuck native generation can never leave the UI on "Thinking" forever.
+        const val GENERATION_TIMEOUT_MS = 45_000L
+        const val EMPTY_REPLY_FALLBACK = "Sorry, I didn't catch that. Could you say that again?"
+    }
+
+    /**
+     * Collects a streaming reply with a watchdog timeout. Returns the raw text. If the model
+     * hangs (no completion within the timeout), the conversation is dropped so the next turn
+     * starts clean, and an empty string is returned so the caller can show a fallback.
+     */
+    private suspend fun collectReply(
+        streamingIndex: Int,
+        flow: Flow<String>,
+        includeOrb: Boolean = true,
+    ): String {
+        val responseBuilder = StringBuilder()
+        var lastUiUpdateMs = 0L
+        val completed = withTimeoutOrNull(GENERATION_TIMEOUT_MS) {
+            flow.collect { token ->
+                lastUiUpdateMs = appendStreamingToken(
+                    streamingIndex,
+                    responseBuilder,
+                    token,
+                    lastUiUpdateMs,
+                    includeOrb,
+                )
+            }
+            true
+        }
+        if (completed == null) {
+            runCatching { engine.endConversation() }
+            voiceSessionActive = false
+        }
+        return responseBuilder.toString()
     }
 
     private fun cleanReply(text: String): String =
@@ -486,19 +522,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
-                val responseBuilder = StringBuilder()
-                var lastUiUpdateMs = 0L
-                engine.sendMessageStreaming(text).collect { token ->
-                    lastUiUpdateMs = appendStreamingToken(
-                        streamingIndex,
-                        responseBuilder,
-                        token,
-                        lastUiUpdateMs,
-                    )
+                val raw = collectReply(streamingIndex, engine.sendMessageStreaming(text))
+                if (cleanReply(raw).isBlank()) {
+                    finalizeStreamingMessage(streamingIndex, EMPTY_REPLY_FALLBACK)
+                } else {
+                    finalizeStreamingMessage(streamingIndex, raw)
+                    viewModelScope.launch { syncClient.syncTurn(text, raw) }
                 }
-
-                finalizeStreamingMessage(streamingIndex, responseBuilder.toString())
-                viewModelScope.launch { syncClient.syncTurn(text, responseBuilder.toString()) }
                 persistCurrentSession()
             } catch (_: CancellationException) {
                 // barge-in or stop
@@ -577,24 +607,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
-                val responseBuilder = StringBuilder()
-                var lastUiUpdateMs = 0L
                 val flow = if (imagePath != null) {
                     engine.sendMultimodalMessage(prompt, imagePath)
                 } else {
                     engine.sendMessageStreaming(prompt)
                 }
-                flow.collect { token ->
-                    lastUiUpdateMs = appendStreamingToken(
-                        streamingIndex,
-                        responseBuilder,
-                        token,
-                        lastUiUpdateMs,
-                    )
+                val raw = collectReply(streamingIndex, flow)
+                if (cleanReply(raw).isBlank()) {
+                    finalizeStreamingMessage(streamingIndex, EMPTY_REPLY_FALLBACK)
+                } else {
+                    finalizeStreamingMessage(streamingIndex, raw)
+                    viewModelScope.launch { syncClient.syncTurn(prompt, raw) }
                 }
-
-                finalizeStreamingMessage(streamingIndex, responseBuilder.toString())
-                viewModelScope.launch { syncClient.syncTurn(prompt, responseBuilder.toString()) }
                 persistCurrentSession()
             } catch (_: CancellationException) {
                 // barge-in or stop — state already handled by cancelResponse()
@@ -668,28 +692,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
-                val responseBuilder = StringBuilder()
-                if (engine.isLoaded) {
-                    var lastUiUpdateMs = 0L
-                    engine.sendMessageStreaming(prompt).collect { token ->
-                        lastUiUpdateMs = appendStreamingToken(
-                            streamingIndex,
-                            responseBuilder,
-                            token,
-                            lastUiUpdateMs,
-                            includeOrb = false,
-                        )
-                    }
+                val raw = if (engine.isLoaded) {
+                    collectReply(streamingIndex, engine.sendMessageStreaming(prompt), includeOrb = false)
                 } else {
-                    responseBuilder.append("CoffeeAI is starting up. Your command has been queued.")
+                    "CoffeeAI is starting up. Your command has been queued."
                 }
-
-                finalizeStreamingMessage(
-                    streamingIndex,
-                    responseBuilder.toString(),
-                    clearLoading = true,
-                )
-                viewModelScope.launch { syncClient.syncTurn(prompt, responseBuilder.toString()) }
+                val finalText = cleanReply(raw).ifBlank { EMPTY_REPLY_FALLBACK }
+                finalizeStreamingMessage(streamingIndex, finalText, clearLoading = true)
+                viewModelScope.launch { syncClient.syncTurn(prompt, finalText) }
                 persistCurrentSession()
                 _brewState.value = BrewState(BrewStatus.Ready, displayName)
             } catch (_: CancellationException) {

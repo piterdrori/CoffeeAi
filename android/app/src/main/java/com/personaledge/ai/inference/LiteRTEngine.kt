@@ -118,16 +118,31 @@ class LiteRTEngine(
                 else -> Message.user(turn.content)
             }
         }
+        // An empty system instruction (Contents.of("")) can make the small model emit empty
+        // or broken output, so only set it when the backend actually provides one.
         conversation = eng.createConversation(
-            ConversationConfig(
-                systemInstruction = Contents.of(systemInstruction),
-                initialMessages = initialMessages,
-                samplerConfig = sampler,
-            ),
+            if (systemInstruction.isBlank()) {
+                ConversationConfig(
+                    initialMessages = initialMessages,
+                    samplerConfig = sampler,
+                )
+            } else {
+                ConversationConfig(
+                    systemInstruction = Contents.of(systemInstruction),
+                    initialMessages = initialMessages,
+                    samplerConfig = sampler,
+                )
+            },
         )
     }
 
     fun hasActiveConversation(): Boolean = conversation != null
+
+    /** Drop the current conversation so the next turn rebuilds a clean one (recovery after a hang). */
+    suspend fun endConversation() = withContext(Dispatchers.IO) {
+        runCatching { conversation?.close() }
+        conversation = null
+    }
 
     fun sendMessageStreaming(text: String): Flow<String> {
         val conv = conversation ?: error("Conversation not started")
