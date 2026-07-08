@@ -56,6 +56,7 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.personaledge.ai.EdgeAiApplication
 import com.personaledge.ai.chat.ChatViewModel
+import com.personaledge.ai.chat.VoiceControl
 import com.personaledge.ai.ui.components.CoffeeAiMark
 import com.personaledge.ai.ui.components.LetsTalkPulseOrb
 import com.personaledge.ai.ui.theme.CoffeeBrown
@@ -264,6 +265,20 @@ fun VoiceModeScreen(
     LaunchedEffect(Unit) {
         tts.autoReadReplies = app.syncClient.getBackendConfig().autoTts
         chatViewModel.loadActiveModel()
+    }
+
+    // The ViewModel removes blank assistant placeholders, so the voice screen can't detect
+    // "nothing to say" from the message list. It signals us to resume listening instead.
+    LaunchedEffect(Unit) {
+        chatViewModel.voiceControl.collect { event ->
+            when (event) {
+                is VoiceControl.ReturnToListening -> {
+                    if (sessionActive && phase != VoiceTalkPhase.Inactive) {
+                        resumeListening()
+                    }
+                }
+            }
+        }
     }
 
     LaunchedEffect(phase, isSpeaking, sessionActive) {

@@ -143,7 +143,7 @@ $gh = Get-Command gh -ErrorAction SilentlyContinue
 if (-not $gh) {
     Write-Warning "GitHub CLI (gh) not found — skipping cloud upload. Install: winget install GitHub.cli"
 } else {
-    $releaseNotes = "CoffeeAI $version — fixes empty replies and stuck-on-Thinking hangs with an empty backend prompt; adds a generation watchdog and empty-reply fallback."
+    $releaseNotes = "CoffeeAI $version — unified text/voice generation lifecycle: turn IDs, identity-based streaming, real native cancellation, dual timeouts, and blank/stale-callback handling to end stuck-Thinking and repeated answers."
     $view = & gh release view $tag --repo $githubRepo 2>&1
     if ($LASTEXITCODE -ne 0) {
         & gh release create $tag --repo $githubRepo --title "CoffeeAI $version" --notes $releaseNotes $ApkDest
@@ -170,7 +170,7 @@ $appMeta = @{
     apk_filename   = "personal-edge-ai.apk"
     apk_size_bytes = $size
     download_url   = $downloadUrl
-    notes          = "CoffeeAI v$version - fixes empty replies and Thinking hangs, adds watchdog"
+    notes          = "CoffeeAI v$version - stable voice/chat: no stuck-Thinking, no repeated answers"
 }
 $appMeta | ConvertTo-Json | Set-Content -Path $appVersionPath -Encoding UTF8
 

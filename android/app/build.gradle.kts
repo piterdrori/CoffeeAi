@@ -13,8 +13,8 @@ android {
         applicationId = "com.personaledge.ai"
         minSdk = 31
         targetSdk = 34
-        versionCode = 12
-        versionName = "1.4.7"
+        versionCode = 13
+        versionName = "1.4.8"
 
         buildConfigField("String", "CLOUD_URL", "\"https://personal-edge-ai.vercel.app\"")
         buildConfigField("String", "CLOUD_API_KEY", "\"dev-api-key-change-me\"")
@@ -117,4 +117,6 @@ dependencies {
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    testImplementation("junit:junit:4.13.2")
 }

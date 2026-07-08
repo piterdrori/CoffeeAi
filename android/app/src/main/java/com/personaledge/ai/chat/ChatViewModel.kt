@@ -2,6 +2,7 @@ package com.personaledge.ai.chat
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.personaledge.ai.EdgeAiApplication
@@ -15,20 +16,27 @@ import com.personaledge.ai.inference.LiteRTEngine
 import com.personaledge.ai.models.ModelCatalog
 import com.personaledge.ai.models.ModelEntry
 import com.personaledge.ai.ui.components.OrbState
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicLong
 
 data class UiMessage(
     val role: String,
@@ -53,6 +61,11 @@ data class ChatUiState(
     val orbState: OrbState = OrbState.Idle,
 )
 
+/** One-shot signals for the voice UI (it can't observe [UiMessage] removal to know to resume). */
+sealed interface VoiceControl {
+    data object ReturnToListening : VoiceControl
+}
+
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as EdgeAiApplication
     private val modelRepository = app.modelRepository
@@ -63,102 +76,46 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var currentSessionId: String? = null
     private var sendJob: Job? = null
     private var machineCommandJob: Job? = null
-    private var voiceSessionActive = false
 
     private companion object {
+        const val TAG = "CoffeeGen"
         const val STREAM_UI_THROTTLE_MS = 80L
-        // Safety net so a stuck native generation can never leave the UI on "Thinking" forever.
-        const val GENERATION_TIMEOUT_MS = 45_000L
-        const val EMPTY_REPLY_FALLBACK = "Sorry, I didn't catch that. Could you say that again?"
+        // Prefill + first token can be slow on CPU with long history, so this budget is generous.
+        // The inter-token budget is what actually catches a real stall once tokens are flowing.
+        const val FIRST_TOKEN_TIMEOUT_MS = 40_000L
+        const val INTER_TOKEN_TIMEOUT_MS = 12_000L
     }
 
-    /**
-     * Collects a streaming reply with a watchdog timeout. Returns the raw text. If the model
-     * hangs (no completion within the timeout), the conversation is dropped so the next turn
-     * starts clean, and an empty string is returned so the caller can show a fallback.
-     */
-    private suspend fun collectReply(
-        streamingIndex: Int,
-        flow: Flow<String>,
-        includeOrb: Boolean = true,
-    ): String {
-        val responseBuilder = StringBuilder()
-        var lastUiUpdateMs = 0L
-        val completed = withTimeoutOrNull(GENERATION_TIMEOUT_MS) {
-            flow.collect { token ->
-                lastUiUpdateMs = appendStreamingToken(
-                    streamingIndex,
-                    responseBuilder,
-                    token,
-                    lastUiUpdateMs,
-                    includeOrb,
-                )
-            }
-            true
-        }
-        if (completed == null) {
-            runCatching { engine.endConversation() }
-            voiceSessionActive = false
-        }
-        return responseBuilder.toString()
+    // ---------------- Single-flight generation lifecycle (shared by text + voice + commands) -----
+
+    // Native inference is single-session; turns must not overlap.
+    private val generationMutex = Mutex()
+    // Monotonic turn id. A callback may only touch shared UI state while its turn is the active one.
+    private val turnSeq = AtomicLong(0L)
+    private val activeTurnId = AtomicLong(0L)
+
+    private fun beginTurn(): Long {
+        val id = turnSeq.incrementAndGet()
+        activeTurnId.set(id)
+        return id
     }
 
-    private fun cleanReply(text: String): String =
-        text
-            .replace(Regex("```[\\s\\S]*?```"), "")
-            .replace("*", "")
-            .replace("`", "")
-            .replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")
-            .replace(Regex("(?m)^\\s*[-•]\\s+"), "")
+    private fun isActiveTurn(turnId: Long): Boolean = activeTurnId.get() == turnId
 
-    private fun appendStreamingToken(
-        streamingIndex: Int,
-        responseBuilder: StringBuilder,
-        token: String,
-        lastUiUpdateMs: Long,
-        includeOrb: Boolean = true,
-    ): Long {
-        responseBuilder.append(token)
-        val now = System.currentTimeMillis()
-        if (now - lastUiUpdateMs < STREAM_UI_THROTTLE_MS) {
-            return lastUiUpdateMs
-        }
-        _uiState.update { state ->
-            val updated = state.messages.toMutableList()
-            if (streamingIndex < updated.size) {
-                updated[streamingIndex] = updated[streamingIndex].copy(
-                    content = cleanReply(responseBuilder.toString()),
-                    isStreaming = true,
-                )
-            }
-            state.copy(
-                messages = updated,
-                orbState = if (includeOrb) OrbState.Thinking else state.orbState,
-            )
-        }
-        return now
+    private fun invalidateTurns() {
+        activeTurnId.set(0L)
     }
 
-    private fun finalizeStreamingMessage(
-        streamingIndex: Int,
-        finalResponse: String,
-        clearLoading: Boolean = true,
-    ) {
-        _uiState.update { state ->
-            val updated = state.messages.toMutableList()
-            if (streamingIndex < updated.size) {
-                updated[streamingIndex] = updated[streamingIndex].copy(
-                    content = cleanReply(finalResponse),
-                    isStreaming = false,
-                )
-            }
-            state.copy(
-                messages = updated,
-                isLoading = if (clearLoading) false else state.isLoading,
-                orbState = if (clearLoading) OrbState.Idle else state.orbState,
-            )
-        }
-    }
+    private enum class GenTimeout { NONE, FIRST_TOKEN, INTER_TOKEN }
+    private data class GenResult(
+        val text: String,
+        val timeout: GenTimeout,
+        val firstTokenMs: Long,
+        val tokenCount: Int,
+    )
+
+    private val _voiceControl = MutableSharedFlow<VoiceControl>(extraBufferCapacity = 8)
+    val voiceControl: SharedFlow<VoiceControl> = _voiceControl.asSharedFlow()
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -176,8 +133,176 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    private fun cleanReply(text: String): String =
+        text
+            .replace(Regex("```[\\s\\S]*?```"), "")
+            .replace("*", "")
+            .replace("`", "")
+            .replace(Regex("(?m)^\\s{0,3}#{1,6}\\s*"), "")
+            .replace(Regex("(?m)^\\s*[-•]\\s+"), "")
+
+    /** Update the assistant message identified by [assistantId]. A stale/removed id is ignored. */
+    private fun updateAssistantMessage(assistantId: String, transform: (UiMessage) -> UiMessage) {
+        _uiState.update { state ->
+            val idx = state.messages.indexOfFirst { it.id == assistantId }
+            if (idx < 0) return@update state
+            val updated = state.messages.toMutableList()
+            updated[idx] = transform(updated[idx])
+            state.copy(messages = updated)
+        }
+    }
+
+    private fun removeMessage(messageId: String) {
+        _uiState.update { state ->
+            state.copy(messages = state.messages.filterNot { it.id == messageId })
+        }
+    }
+
+    private fun setIdleState() {
+        _uiState.update { it.copy(isLoading = false, orbState = OrbState.Idle) }
+    }
+
+    private fun timeoutError(timeout: GenTimeout): String = when (timeout) {
+        GenTimeout.FIRST_TOKEN -> "CoffeeAI took too long to start responding. Please try again."
+        GenTimeout.INTER_TOKEN -> "The response stalled. Please try again."
+        GenTimeout.NONE -> "No response — please try again."
+    }
+
+    /**
+     * Runs a single turn under the single-flight lock with two watchdogs:
+     *  - first-token/prefill timeout (covers conversation creation + first token),
+     *  - inter-token idle timeout (armed only after the first token arrives).
+     * Tokens append to [assistantId] and only while [turnId] is the active turn.
+     * On timeout, native generation is stopped with cancelProcess() (coroutine cancel alone
+     * does NOT stop native inference — verified against the litertlm callbackFlow).
+     */
+    private suspend fun runGeneration(
+        turnId: Long,
+        assistantId: String,
+        startConversation: suspend () -> Unit,
+        makeFlow: () -> Flow<String>,
+        includeOrb: Boolean,
+    ): GenResult = generationMutex.withLock {
+        val builder = StringBuilder()
+        var lastUiMs = 0L
+        val startMs = System.currentTimeMillis()
+        var firstTokenAtMs = 0L
+        var lastTokenMs = startMs
+        var tokenCount = 0
+        var timeout = GenTimeout.NONE
+
+        coroutineScope {
+            val generation = launch {
+                startConversation()
+                makeFlow().collect { token ->
+                    if (!isActiveTurn(turnId)) return@collect
+                    if (firstTokenAtMs == 0L && token.isNotEmpty()) {
+                        firstTokenAtMs = System.currentTimeMillis()
+                    }
+                    lastTokenMs = System.currentTimeMillis()
+                    tokenCount++
+                    builder.append(token)
+                    val now = System.currentTimeMillis()
+                    if (now - lastUiMs >= STREAM_UI_THROTTLE_MS) {
+                        lastUiMs = now
+                        val snapshot = cleanReply(builder.toString())
+                        updateAssistantMessage(assistantId) {
+                            it.copy(content = snapshot, isStreaming = true)
+                        }
+                        if (includeOrb && isActiveTurn(turnId)) {
+                            _uiState.update { it.copy(orbState = OrbState.Thinking) }
+                        }
+                    }
+                }
+            }
+            val watchdog = launch {
+                while (generation.isActive) {
+                    delay(500)
+                    val now = System.currentTimeMillis()
+                    if (firstTokenAtMs == 0L) {
+                        if (now - startMs > FIRST_TOKEN_TIMEOUT_MS) {
+                            timeout = GenTimeout.FIRST_TOKEN
+                            engine.cancelGeneration()
+                            generation.cancel()
+                            break
+                        }
+                    } else if (now - lastTokenMs > INTER_TOKEN_TIMEOUT_MS) {
+                        timeout = GenTimeout.INTER_TOKEN
+                        engine.cancelGeneration()
+                        generation.cancel()
+                        break
+                    }
+                }
+            }
+            generation.join()
+            watchdog.cancel()
+        }
+        val firstMs = if (firstTokenAtMs == 0L) -1L else firstTokenAtMs - startMs
+        GenResult(builder.toString(), timeout, firstMs, tokenCount)
+    }
+
+    /** Applies a completed turn's result — only if the turn is still active. */
+    private fun finishTurn(
+        turnId: Long,
+        assistantId: String,
+        prompt: String,
+        result: GenResult,
+        isVoice: Boolean,
+    ) {
+        if (!isActiveTurn(turnId)) {
+            Log.i(TAG, "turn=$turnId stale-finish rejected (active=${activeTurnId.get()})")
+            updateAssistantMessage(assistantId) { it.copy(isStreaming = false) }
+            return
+        }
+        val clean = cleanReply(result.text).trim()
+        Log.i(
+            TAG,
+            "turn=$turnId done msg=$assistantId firstTokenMs=${result.firstTokenMs} tokens=${result.tokenCount} " +
+                "timeout=${result.timeout} respLen=${clean.length} respHash=${clean.hashCode()}",
+        )
+        if (clean.isNotBlank()) {
+            updateAssistantMessage(assistantId) { it.copy(content = clean, isStreaming = false) }
+            setIdleState()
+            invalidateTurns()
+            viewModelScope.launch { syncClient.syncTurn(prompt, clean) }
+        } else {
+            // Blank reply: never persist, never feed to history, never speak a canned line.
+            removeMessage(assistantId)
+            setIdleState()
+            invalidateTurns()
+            if (isVoice) {
+                _voiceControl.tryEmit(VoiceControl.ReturnToListening)
+            } else {
+                _uiState.update { it.copy(error = timeoutError(result.timeout)) }
+            }
+        }
+        viewModelScope.launch { persistCurrentSession() }
+    }
+
+    /** Cleans up after an exception during a turn (never leaves a blank streaming bubble). */
+    private fun failTurn(turnId: Long, assistantId: String, e: Throwable, isVoice: Boolean) {
+        engine.cancelGeneration()
+        if (!isActiveTurn(turnId)) return
+        removeMessage(assistantId)
+        invalidateTurns()
+        _uiState.update {
+            it.copy(isLoading = false, orbState = OrbState.Idle, error = e.message ?: "Generation failed")
+        }
+        Log.w(TAG, "turn=$turnId failed msg=$assistantId: ${e.message}")
+        if (isVoice) _voiceControl.tryEmit(VoiceControl.ReturnToListening)
+    }
+
     fun loadSession(sessionId: String) {
         if (currentSessionId == sessionId && _uiState.value.messages.isNotEmpty()) return
+        // Switching sessions while a turn is generating: stop and invalidate it so its late
+        // callbacks cannot touch the newly loaded session's message list.
+        val sJob = sendJob
+        val mJob = machineCommandJob
+        sendJob = null
+        machineCommandJob = null
+        resetGenerationUiState(cancelNative = true, clearError = true)
+        sJob?.cancel()
+        mJob?.cancel()
         currentSessionId = sessionId
         viewModelScope.launch { loadSessionInternal(sessionId) }
     }
@@ -210,14 +335,13 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (engine.isLoaded) {
             val memory = syncClient.offlineContext()
-            val history = messages.map { ChatTurn(it.role, it.content) }
-            engine.startConversation(memory, history)
+            engine.startConversation(memory, ChatLogic.sanitizeHistory(messages))
         }
     }
 
     private suspend fun persistCurrentSession() {
         val sessionId = currentSessionId ?: return
-        val messages = _uiState.value.messages.filter { !it.isStreaming }
+        val messages = ChatLogic.persistableMessages(_uiState.value.messages)
         if (messages.isEmpty()) {
             sessionStore.deleteSession(sessionId)
             return
@@ -250,8 +374,6 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             ?: ModelCatalog.defaultModel()
 
         // Engine already loaded and ready with this model — do NOT reload it.
-        // Reloading on every screen entry closed/reopened the engine and raced with the
-        // voice session start, which left the 2nd Let's Talk stuck on "Thinking".
         if (engine.isLoaded && engine.loadedModelId() == primary.id && _uiState.value.isEngineReady) {
             if (!engine.hasActiveConversation()) {
                 runCatching {
@@ -426,122 +548,57 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(pendingImagePath = null, pendingImageUri = null) }
     }
 
-    fun cancelResponse() {
-        sendJob?.cancel()
-        sendJob = null
+    /**
+     * Single cleanup helper for active-generation UI state. Invalidates the active turn (so late
+     * callbacks are rejected), optionally stops native generation, removes blank streaming
+     * placeholders, finalizes any remaining streaming message, and returns the UI to idle.
+     * It does NOT cancel coroutine jobs — callers cancel the specific job (sendJob /
+     * machineCommandJob) to avoid cancelling themselves recursively.
+     */
+    private fun resetGenerationUiState(cancelNative: Boolean = true, clearError: Boolean = false) {
+        invalidateTurns()
+        if (cancelNative) engine.cancelGeneration()
         _uiState.update { state ->
-            val trimmed = state.messages.toMutableList()
-            if (trimmed.lastOrNull()?.role == "assistant" &&
-                trimmed.last().content.isBlank()
-            ) {
-                trimmed.removeAt(trimmed.lastIndex)
-            }
             state.copy(
+                messages = ChatLogic.clearedStreamingMessages(state.messages),
                 isLoading = false,
                 orbState = OrbState.Idle,
-                error = null,
-                messages = trimmed.map { msg ->
-                    if (msg.isStreaming) msg.copy(isStreaming = false) else msg
-                },
+                error = if (clearError) null else state.error,
             )
         }
     }
 
+    /**
+     * Cancels the in-flight turn deterministically: mark the turn inactive (so late callbacks are
+     * rejected), stop native generation, clean the UI, then cancel the coroutine. Idempotent.
+     */
+    fun cancelResponse() {
+        Log.i(TAG, "cancelResponse (active=${activeTurnId.get()})")
+        val job = sendJob
+        sendJob = null
+        resetGenerationUiState(cancelNative = true, clearError = true)
+        job?.cancel()
+    }
+
     fun beginVoiceSession() {
+        // Ensure the model is loaded; the conversation is (re)built fresh for each turn.
         viewModelScope.launch {
             if (!_uiState.value.isEngineReady) {
                 loadActiveModelInternal()
             }
-            if (!_uiState.value.isEngineReady) return@launch
-            val memory = syncClient.offlineContext()
-            val history = _uiState.value.messages
-                .filter { !it.isStreaming }
-                .map { ChatTurn(it.role, it.content) }
-            engine.startVoiceConversation(memory, history)
-            voiceSessionActive = true
         }
     }
 
     fun endVoiceSession() {
-        voiceSessionActive = false
+        // Voice screen closing — make sure no turn keeps running or writes back.
+        invalidateTurns()
+        engine.cancelGeneration()
     }
 
     fun sendVoiceMessage() {
         val text = _uiState.value.inputText.trim()
         if (text.isBlank() || _uiState.value.isLoading) return
-
-        sendJob?.cancel()
-        sendJob = viewModelScope.launch {
-            try {
-                ensureSessionInStore()
-                if (!_uiState.value.isEngineReady) {
-                    loadActiveModelInternal()
-                    if (!_uiState.value.isEngineReady) {
-                        val err = _uiState.value.error ?: "CoffeeAI is still starting up. Please wait a moment."
-                        _uiState.update {
-                            it.copy(
-                                inputText = "",
-                                messages = it.messages + UiMessage("user", text) +
-                                    UiMessage("assistant", err),
-                            )
-                        }
-                        return@launch
-                    }
-                }
-
-                _uiState.update {
-                    it.copy(
-                        inputText = "",
-                        isLoading = true,
-                        orbState = OrbState.Thinking,
-                        messages = it.messages + UiMessage("user", text),
-                        error = null,
-                    )
-                }
-
-                if (!voiceSessionActive || !engine.hasActiveConversation()) {
-                    val memory = syncClient.offlineContext()
-                    val history = _uiState.value.messages
-                        .filter { !it.isStreaming }
-                        .dropLast(1)
-                        .map { ChatTurn(it.role, it.content) }
-                    engine.startVoiceConversation(memory, history)
-                    voiceSessionActive = true
-                }
-
-                val streamingIndex = _uiState.value.messages.size
-                val assistantId = UUID.randomUUID().toString()
-                _uiState.update {
-                    it.copy(
-                        messages = it.messages + UiMessage(
-                            id = assistantId,
-                            role = "assistant",
-                            content = "",
-                            isStreaming = true,
-                        ),
-                    )
-                }
-
-                val raw = collectReply(streamingIndex, engine.sendMessageStreaming(text))
-                if (cleanReply(raw).isBlank()) {
-                    finalizeStreamingMessage(streamingIndex, EMPTY_REPLY_FALLBACK)
-                } else {
-                    finalizeStreamingMessage(streamingIndex, raw)
-                    viewModelScope.launch { syncClient.syncTurn(text, raw) }
-                }
-                persistCurrentSession()
-            } catch (_: CancellationException) {
-                // barge-in or stop
-            } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        orbState = OrbState.Idle,
-                        error = e.message ?: "Generation failed",
-                    )
-                }
-            }
-        }
+        startTurn(prompt = text, imagePath = null, isVoice = true)
     }
 
     fun sendMessage() {
@@ -549,26 +606,47 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val imagePath = _uiState.value.pendingImagePath
         if ((text.isBlank() && imagePath == null) || _uiState.value.isLoading) return
         val prompt = text.ifBlank { "Describe this image." }
+        startTurn(prompt = prompt, imagePath = imagePath, isVoice = false)
+    }
 
+    /** Shared entry point for text and voice turns. */
+    private fun startTurn(prompt: String, imagePath: String?, isVoice: Boolean) {
         sendJob?.cancel()
+        val turnId = beginTurn()
+        val assistantId = UUID.randomUUID().toString()
+        val pendingImageUri = _uiState.value.pendingImageUri
         sendJob = viewModelScope.launch {
             try {
                 ensureSessionInStore()
                 if (!_uiState.value.isEngineReady) {
                     loadActiveModelInternal()
                     if (!_uiState.value.isEngineReady) {
+                        invalidateTurns()
                         val err = _uiState.value.error ?: "CoffeeAI is still starting up. Please wait a moment."
                         _uiState.update {
                             it.copy(
                                 inputText = "",
-                                messages = it.messages + UiMessage("user", prompt, imageUri = it.pendingImageUri) +
-                                    UiMessage("assistant", err),
+                                isLoading = false,
+                                orbState = OrbState.Idle,
+                                messages = it.messages + UiMessage("user", prompt, imageUri = pendingImageUri),
+                                error = err,
                                 pendingImagePath = null,
                                 pendingImageUri = null,
                             )
                         }
+                        if (isVoice) _voiceControl.tryEmit(VoiceControl.ReturnToListening)
                         return@launch
                     }
+                }
+
+                // History = everything BEFORE this turn's user message (sanitized). The new prompt
+                // is sent separately, so it appears exactly once.
+                val priorMessages = _uiState.value.messages
+                val history = ChatLogic.sanitizeHistory(priorMessages)
+                val memory = if (isVoice) {
+                    syncClient.offlineContext()
+                } else {
+                    syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
                 }
 
                 _uiState.update {
@@ -576,60 +654,40 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         inputText = "",
                         isLoading = true,
                         orbState = OrbState.Thinking,
-                        messages = it.messages + UiMessage(
-                            "user",
-                            prompt,
-                            imageUri = it.pendingImageUri,
-                        ),
+                        messages = it.messages +
+                            UiMessage("user", prompt, imageUri = pendingImageUri) +
+                            UiMessage(id = assistantId, role = "assistant", content = "", isStreaming = true),
                         error = null,
+                        memoryConnected = memory.memoryChunks.isNotEmpty(),
                         pendingImagePath = null,
                         pendingImageUri = null,
                     )
                 }
-                val memory = syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
-                _uiState.update { it.copy(memoryConnected = memory.memoryChunks.isNotEmpty()) }
-                val history = _uiState.value.messages
-                    .filter { !it.isStreaming }
-                    .dropLast(1)
-                    .map { ChatTurn(it.role, it.content) }
-                engine.startConversation(memory, history)
 
-                val streamingIndex = _uiState.value.messages.size
-                val assistantId = UUID.randomUUID().toString()
-                _uiState.update {
-                    it.copy(
-                        messages = it.messages + UiMessage(
-                            id = assistantId,
-                            role = "assistant",
-                            content = "",
-                            isStreaming = true,
-                        ),
-                    )
-                }
+                Log.i(
+                    TAG,
+                    "turn=$turnId start msg=$assistantId voice=$isVoice historyCount=${history.size} " +
+                        "promptLen=${prompt.length} promptHash=${prompt.hashCode()} model=${_uiState.value.activeModelId}",
+                )
 
-                val flow = if (imagePath != null) {
-                    engine.sendMultimodalMessage(prompt, imagePath)
-                } else {
-                    engine.sendMessageStreaming(prompt)
-                }
-                val raw = collectReply(streamingIndex, flow)
-                if (cleanReply(raw).isBlank()) {
-                    finalizeStreamingMessage(streamingIndex, EMPTY_REPLY_FALLBACK)
-                } else {
-                    finalizeStreamingMessage(streamingIndex, raw)
-                    viewModelScope.launch { syncClient.syncTurn(prompt, raw) }
-                }
-                persistCurrentSession()
+                val result = runGeneration(
+                    turnId = turnId,
+                    assistantId = assistantId,
+                    startConversation = {
+                        if (isVoice) engine.startVoiceConversation(memory, history)
+                        else engine.startConversation(memory, history)
+                    },
+                    makeFlow = {
+                        if (imagePath != null) engine.sendMultimodalMessage(prompt, imagePath)
+                        else engine.sendMessageStreaming(prompt)
+                    },
+                    includeOrb = true,
+                )
+                finishTurn(turnId, assistantId, prompt, result, isVoice)
             } catch (_: CancellationException) {
-                // barge-in or stop — state already handled by cancelResponse()
+                // Cancelled by cancelResponse()/supersession — UI already handled there.
             } catch (e: Exception) {
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        orbState = OrbState.Idle,
-                        error = e.message ?: "Generation failed",
-                    )
-                }
+                failTurn(turnId, assistantId, e, isVoice)
             }
         }
     }
@@ -640,8 +698,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun cancelMachineCommand() {
-        machineCommandJob?.cancel()
+        // Capture + null the job first so this is safe even if invoked from within the job,
+        // and so cleanup runs exactly once.
+        val job = machineCommandJob
         machineCommandJob = null
+        resetGenerationUiState(cancelNative = true)
+        job?.cancel()
         _brewState.value = BrewState()
     }
 
@@ -656,6 +718,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val prompt = command.toMessage()
 
         machineCommandJob?.cancel()
+        val turnId = beginTurn()
+        val assistantId = UUID.randomUUID().toString()
         machineCommandJob = viewModelScope.launch {
             try {
                 ensureSessionInStore()
@@ -663,54 +727,54 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     loadActiveModelInternal()
                 }
                 _brewState.value = BrewState(BrewStatus.Brewing, displayName)
+                val priorMessages = _uiState.value.messages
+                val history = ChatLogic.sanitizeHistory(priorMessages)
+                val memory = syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
+
                 _uiState.update {
                     it.copy(
                         isLoading = true,
-                        messages = it.messages + UiMessage("user", prompt),
+                        messages = it.messages +
+                            UiMessage("user", prompt) +
+                            UiMessage(id = assistantId, role = "assistant", content = "", isStreaming = true),
                         error = null,
                     )
                 }
-                val memory = syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
-                val history = _uiState.value.messages
-                    .filter { !it.isStreaming }
-                    .dropLast(1)
-                    .map { ChatTurn(it.role, it.content) }
-                if (engine.isLoaded) {
-                    engine.startConversation(memory, history)
-                }
 
-                val streamingIndex = _uiState.value.messages.size
-                val assistantId = UUID.randomUUID().toString()
-                _uiState.update {
-                    it.copy(
-                        messages = it.messages + UiMessage(
-                            id = assistantId,
-                            role = "assistant",
-                            content = "",
-                            isStreaming = true,
-                        ),
+                val result = if (engine.isLoaded) {
+                    runGeneration(
+                        turnId = turnId,
+                        assistantId = assistantId,
+                        startConversation = { engine.startConversation(memory, history) },
+                        makeFlow = { engine.sendMessageStreaming(prompt) },
+                        includeOrb = false,
                     )
+                } else {
+                    GenResult("CoffeeAI is starting up. Your command has been queued.", GenTimeout.NONE, -1L, 0)
                 }
 
-                val raw = if (engine.isLoaded) {
-                    collectReply(streamingIndex, engine.sendMessageStreaming(prompt), includeOrb = false)
-                } else {
-                    "CoffeeAI is starting up. Your command has been queued."
+                if (isActiveTurn(turnId)) {
+                    val clean = cleanReply(result.text).trim()
+                    if (clean.isNotBlank()) {
+                        updateAssistantMessage(assistantId) { it.copy(content = clean, isStreaming = false) }
+                        viewModelScope.launch { syncClient.syncTurn(prompt, clean) }
+                    } else {
+                        removeMessage(assistantId)
+                    }
+                    _uiState.update { it.copy(isLoading = false, orbState = OrbState.Idle) }
+                    invalidateTurns()
+                    persistCurrentSession()
                 }
-                val finalText = cleanReply(raw).ifBlank { EMPTY_REPLY_FALLBACK }
-                finalizeStreamingMessage(streamingIndex, finalText, clearLoading = true)
-                viewModelScope.launch { syncClient.syncTurn(prompt, finalText) }
-                persistCurrentSession()
                 _brewState.value = BrewState(BrewStatus.Ready, displayName)
             } catch (_: CancellationException) {
                 _brewState.value = BrewState()
             } catch (e: Exception) {
+                failTurn(turnId, assistantId, e, isVoice = false)
                 _brewState.value = BrewState(
                     BrewStatus.Error,
                     displayName,
                     e.message ?: "Command failed",
                 )
-                _uiState.update { it.copy(isLoading = false) }
             }
         }
         machineCommandJob?.join()
@@ -721,6 +785,15 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun clearChatInternal() {
+        // Stop any in-flight text/voice/machine generation before wiping the list.
+        val sJob = sendJob
+        val mJob = machineCommandJob
+        sendJob = null
+        machineCommandJob = null
+        resetGenerationUiState(cancelNative = true, clearError = true)
+        sJob?.cancel()
+        mJob?.cancel()
+        _brewState.value = BrewState()
         _uiState.update { it.copy(messages = emptyList()) }
         currentSessionId?.let { sessionId ->
             if (!sessionStore.hasMessages(sessionId)) {
@@ -735,6 +808,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     override fun onCleared() {
+        invalidateTurns()
+        engine.cancelGeneration()
+        sendJob?.cancel()
+        machineCommandJob?.cancel()
         viewModelScope.launch { engine.close() }
         super.onCleared()
     }

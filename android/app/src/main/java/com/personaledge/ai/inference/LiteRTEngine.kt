@@ -138,8 +138,22 @@ class LiteRTEngine(
 
     fun hasActiveConversation(): Boolean = conversation != null
 
+    /**
+     * Immediately stops the in-flight native generation so the engine is free for the next
+     * message. This is the real "dead stop" for Stop AI / End session / barge-in and for the
+     * watchdog — coroutine cancellation alone does NOT stop native inference (the litertlm
+     * callbackFlow's awaitClose is a no-op), so this native cancelProcess() is required.
+     *
+     * Safe to call repeatedly and when no generation is running (idempotent). It is intentionally
+     * lightweight (no blocking close) so it can be called while the generation lock is held.
+     */
+    fun cancelGeneration() {
+        runCatching { conversation?.cancelProcess() }
+    }
+
     /** Drop the current conversation so the next turn rebuilds a clean one (recovery after a hang). */
     suspend fun endConversation() = withContext(Dispatchers.IO) {
+        runCatching { conversation?.cancelProcess() }
         runCatching { conversation?.close() }
         conversation = null
     }
