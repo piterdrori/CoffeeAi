@@ -1,9 +1,9 @@
 ﻿{
-    "version":  "1.4.9",
+    "version":  "1.4.10",
     "apk_filename":  "personal-edge-ai.apk",
-    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.9/personal-edge-ai.apk",
-    "notes":  "CoffeeAI v1.4.9 - voice completion events, hard Stop-AI, TTS identity, perf metrics",
-    "apk_size_bytes":  1143257956,
-    "version_code":  14,
-    "updated_at":  "2026-07-08T02:56:27.8028528Z"
+    "download_url":  "https://github.com/piterdrori/CoffeeAi/releases/download/v1.4.10/personal-edge-ai.apk",
+    "notes":  "CoffeeAI v1.4.10 - bounded history for stable latency, durable voice state (no stuck Thinking), hard Stop-AI",
+    "apk_size_bytes":  1143274336,
+    "version_code":  15,
+    "updated_at":  "2026-07-08T04:01:32.9191342Z"
 }
