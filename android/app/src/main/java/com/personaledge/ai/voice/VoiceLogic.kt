@@ -30,11 +30,35 @@ object VoiceLogic {
         callbackSpeechId == 0L || callbackSpeechId != activeSpeechId
 
     /**
-     * A durable terminal voice outcome (ReadyToSpeak / Error) should be acted on only when its
-     * [sequence] is newer than the last one already handled. This makes reconciliation from the
-     * StateFlow idempotent: a recomposition or re-subscription that re-reads the same completed
-     * state cannot start TTS (or re-show a notice) twice for the same turn.
+     * A durable terminal voice outcome (ReadyToSpeak / Error) may be acted on exactly once, and only
+     * when the screen was actually processing the matching turn. This is the fix for the Listening
+     * loop / re-entry replay: a terminal that is already [consumed] (durably, in the ViewModel), that
+     * arrives with no active session, or that the screen was NOT mid-turn for (e.g. a stale terminal
+     * or one completed while the screen was gone) must NOT reopen the microphone or restart TTS.
      */
-    fun shouldHandleTerminal(sequence: Long, lastHandledSequence: Long): Boolean =
-        sequence > lastHandledSequence
+    fun shouldConsumeTerminal(consumed: Boolean, sessionActive: Boolean, screenWasProcessing: Boolean): Boolean =
+        !consumed && sessionActive && screenWasProcessing
+
+    /**
+     * A live STT callback (partial/final) belongs to the currently-active utterance. An id of 0 means
+     * the utterance was invalidated (Stop AI, screen exit, generation start, explicit STT stop), so
+     * late callbacks from a cancelled recognizer are rejected.
+     */
+    fun isActiveUtterance(callbackUtteranceId: Long, activeUtteranceId: Long): Boolean =
+        callbackUtteranceId != 0L && callbackUtteranceId == activeUtteranceId
+
+    /**
+     * One STT utterance id may submit exactly once. Identity-based (not text-based): an invalidated
+     * id (0) never submits, and re-submitting the same id is rejected — but a user intentionally
+     * repeating the same words produces a NEW id and is therefore allowed.
+     */
+    fun canSubmitUtterance(utteranceId: Long, lastSubmittedUtteranceId: Long): Boolean =
+        utteranceId != 0L && utteranceId != lastSubmittedUtteranceId
+
+    /**
+     * STT may (re)open for listening only when no generation or speech is active. Prevents a stray
+     * effect/recomposition from reopening the mic while the turn is still Generating/Thinking/Speaking.
+     */
+    fun canAcceptListening(isLoading: Boolean, generating: Boolean, thinking: Boolean, speaking: Boolean): Boolean =
+        !isLoading && !generating && !thinking && !speaking
 }

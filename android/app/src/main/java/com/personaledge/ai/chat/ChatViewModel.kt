@@ -97,6 +97,13 @@ data class VoiceTurnState(
     val error: String? = null,
     val speechRequested: Boolean = false,
     val sequence: Long = 0,
+    /**
+     * Durable "this terminal outcome was already handled" flag. Set by [ChatViewModel.consumeVoiceTerminal]
+     * once the voice UI has acted on a [VoicePhase.ReadyToSpeak]/[VoicePhase.Error]. Because it lives
+     * in the ViewModel (not a screen-local `remember`), a terminal cannot replay after screen
+     * exit/re-entry or recomposition.
+     */
+    val consumed: Boolean = false,
 )
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
@@ -179,7 +186,24 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 error = message,
                 speechRequested = false,
                 sequence = voiceSeq.incrementAndGet(),
+                consumed = false,
             )
+        }
+    }
+
+    /**
+     * Durably marks the terminal outcome [sequence] as handled so it cannot replay (screen re-entry,
+     * recomposition, or a second collector). Idempotent — only the matching, not-yet-consumed
+     * terminal is affected.
+     */
+    fun consumeVoiceTerminal(sequence: Long) {
+        _voiceTurn.update {
+            if (it.sequence == sequence && !it.consumed) {
+                Log.i(TAG, "voice terminal consumed seq=$sequence phase=${it.phase}")
+                it.copy(consumed = true)
+            } else {
+                it
+            }
         }
     }
 
@@ -838,6 +862,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                             finalText = null,
                             error = null,
                             speechRequested = false,
+                            consumed = false,
                         )
                     }
                 }

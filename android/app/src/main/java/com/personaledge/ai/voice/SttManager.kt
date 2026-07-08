@@ -85,14 +85,39 @@ class SttManager(context: Context) {
     @Volatile
     private var bargeInMicEpoch = 0
 
+    // Monotonic STT utterance identity. A new listen mints the next id; Stop AI / screen exit /
+    // generation start / explicit stop invalidate it (set to 0). Only the active id may emit live
+    // text or a final, so late callbacks from a cancelled recognizer are rejected.
+    @Volatile
+    private var utteranceIdSeq = 0L
+
+    @Volatile
+    private var activeUtteranceId = 0L
+
     private var bargeInRmsThreshold = SherpaVoiceConfig.SPEECH_RMS_THRESHOLD
 
     private var echoCanceler: AcousticEchoCanceler? = null
     private var noiseSuppressor: NoiseSuppressor? = null
 
-    var onPartialText: ((String) -> Unit)? = null
-    var onUtteranceComplete: ((String) -> Unit)? = null
+    var onPartialText: ((Long, String) -> Unit)? = null
+    var onUtteranceComplete: ((Long, String) -> Unit)? = null
     var onBargeIn: (() -> Unit)? = null
+
+    /** Mints the id for a new listen operation. */
+    private fun nextUtteranceId(): Long {
+        utteranceIdSeq += 1
+        activeUtteranceId = utteranceIdSeq
+        Log.i(TAG, "utterance start id=$activeUtteranceId")
+        return activeUtteranceId
+    }
+
+    /** Invalidates the active utterance so any in-flight recognizer callback is rejected. */
+    fun invalidateUtterance() {
+        if (activeUtteranceId != 0L) {
+            Log.i(TAG, "utterance invalidated id=$activeUtteranceId")
+        }
+        activeUtteranceId = 0L
+    }
 
     private val _isListening = MutableStateFlow(false)
     val isListening: StateFlow<Boolean> = _isListening
@@ -405,16 +430,20 @@ class SttManager(context: Context) {
         sessionRunning = false
         _sessionActive.value = false
         allowBargeIn = false
+        invalidateUtterance()
     }
 
     fun setAcceptingUtterance(accept: Boolean) {
         acceptingUtterance = accept
-        if (!accept && !allowBargeIn) {
-            if (SherpaVoiceConfig.useOnlineSttOnEmulator) {
+        if (!accept) {
+            // Closing acceptance also invalidates the current utterance so a final that arrives from
+            // the recognizer after this point (e.g. generation just started) is rejected.
+            invalidateUtterance()
+            if (!allowBargeIn && SherpaVoiceConfig.useOnlineSttOnEmulator) {
                 emulatorStt?.cancel()
                 _micLevel.value = 0f
             }
-        } else if (accept) {
+        } else {
             clearText()
             bargeInTriggered = false
         }
@@ -586,14 +615,17 @@ class SttManager(context: Context) {
     }
 
     private suspend fun listenForUtteranceEmulator(stt: EmulatorSpeechStt) {
+        val myId = nextUtteranceId()
         prepareEmulatorRecognizer()
         delay(200)
-        if (!sessionRunning || !acceptingUtterance) return
+        if (!sessionRunning || !acceptingUtterance || myId != activeUtteranceId) return
 
         stt.onPartial = { text ->
-            _partialText.value = text
-            onPartialText?.invoke(text)
-            _error.value = null
+            if (myId == activeUtteranceId) {
+                _partialText.value = text
+                onPartialText?.invoke(myId, text)
+                _error.value = null
+            }
         }
         stt.onLevel = { level ->
             _micConnected.value = level >= SherpaVoiceConfig.MIC_READY_LEVEL
@@ -604,11 +636,16 @@ class SttManager(context: Context) {
         }
         resetSrMicBaseline()
         _partialText.value = "Listening…"
-        onPartialText?.invoke(_partialText.value)
+        onPartialText?.invoke(myId, _partialText.value)
         _error.value = null
         val text = stt.listenOnce()
         if (!sessionRunning) return
         if (!acceptingUtterance) return
+        // Reject a final from a recognizer that was cancelled/superseded (Stop AI, generation start).
+        if (myId != activeUtteranceId) {
+            Log.i(TAG, "stale STT final rejected id=$myId active=$activeUtteranceId")
+            return
+        }
         _partialText.value = ""
         if (text.isBlank()) {
             if (suppressEmptySttErrorOnce) {
@@ -618,13 +655,14 @@ class SttManager(context: Context) {
             _error.value = "Couldn't catch that — speak clearly and pause when done."
             return
         }
-        Log.i(TAG, "Emulator STT result: \"$text\"")
+        Log.i(TAG, "Emulator STT result id=$myId len=${text.length}")
         _finalText.value = text
         acceptingUtterance = false
+        activeUtteranceId = 0L // consume this utterance so no late duplicate can fire
         emulatorStt?.cancel()
         stt.onRmsDb = null
         decayMicLevel()
-        onUtteranceComplete?.invoke(text)
+        onUtteranceComplete?.invoke(myId, text)
         while (sessionRunning && !acceptingUtterance && !allowBargeIn) {
             delay(100)
         }
@@ -745,16 +783,26 @@ class SttManager(context: Context) {
 
     private suspend fun runSession() {
         while (sessionRunning) {
+            val myId = nextUtteranceId()
             val utterance = collectUtterance()
             if (!sessionRunning) break
             val text = utterance.trim()
-            if (text.isNotBlank()) {
-                _finalText.value = text
-                _partialText.value = ""
-                onUtteranceComplete?.invoke(text)
-            } else {
-                _partialText.value = ""
-                _error.value = "Couldn't understand that — speak clearly and pause when done."
+            when {
+                text.isNotBlank() && myId == activeUtteranceId -> {
+                    _finalText.value = text
+                    _partialText.value = ""
+                    activeUtteranceId = 0L // consume this utterance
+                    onUtteranceComplete?.invoke(myId, text)
+                }
+                text.isNotBlank() -> {
+                    // Superseded/invalidated (Stop AI, generation start) — drop the stale final.
+                    Log.i(TAG, "stale Whisper final rejected id=$myId active=$activeUtteranceId")
+                    _partialText.value = ""
+                }
+                else -> {
+                    _partialText.value = ""
+                    _error.value = "Couldn't understand that — speak clearly and pause when done."
+                }
             }
         }
     }
@@ -873,7 +921,7 @@ class SttManager(context: Context) {
                         samples.add(sample)
                     }
                     _partialText.value = "Listening…"
-                    onPartialText?.invoke(_partialText.value)
+                    onPartialText?.invoke(activeUtteranceId, _partialText.value)
 
                     val silentFor = now - lastSpeechAtMs
                     val spokeFor = now - speechStartedAtMs
@@ -932,7 +980,7 @@ class SttManager(context: Context) {
 
         _isTranscribing.value = true
         _partialText.value = "Transcribing…"
-        onPartialText?.invoke(_partialText.value)
+        onPartialText?.invoke(activeUtteranceId, _partialText.value)
         val tickJob = scope.launch {
             var seconds = 0
             while (true) {
@@ -994,6 +1042,7 @@ class SttManager(context: Context) {
         exitVoiceAudioMode()
         sessionRunning = false
         acceptingUtterance = false
+        activeUtteranceId = 0L
         bargeInDuringTts = false
         ttsPlaybackActive = false
         suppressEmptySttErrorOnce = false

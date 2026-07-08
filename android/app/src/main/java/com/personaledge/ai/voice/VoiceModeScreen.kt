@@ -65,6 +65,7 @@ import com.personaledge.ai.ui.theme.CoffeeBrownDark
 import com.personaledge.ai.ui.theme.CoffeeText
 import com.personaledge.ai.ui.theme.Error
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicLong
 
@@ -74,6 +75,9 @@ private enum class VoiceTalkPhase {
     Thinking,
     Speaking,
 }
+
+/** Brief settle after a failed voice turn so the cancelled recognizer releases before reopening. */
+private const val ERROR_SETTLE_MS = 350L
 
 @Composable
 fun VoiceModeScreen(
@@ -108,9 +112,10 @@ fun VoiceModeScreen(
     val activeSpeechId = remember { AtomicLong(0L) }
     var speakingText by remember { mutableStateOf("") }
     var voiceNotice by remember { mutableStateOf<String?>(null) }
-    // Highest durable voice sequence already acted on — makes ReadyToSpeak/Error idempotent so a
-    // recomposition (or re-subscription) reconciling from the StateFlow can never start TTS twice.
-    var lastHandledVoiceSeq by remember { mutableLongStateOf(0L) }
+    // The last STT utterance id submitted as a turn — identity guard so one spoken utterance creates
+    // exactly one model turn (a repeated phrase gets a new id and is allowed). Terminal-replay
+    // protection lives durably in ChatViewModel.voiceTurn.consumed (survives screen re-entry).
+    var lastSubmittedUtteranceId by remember { mutableLongStateOf(0L) }
     var hasMicPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -143,6 +148,7 @@ fun VoiceModeScreen(
 
     fun stopVoiceSession() {
         activeSpeechId.set(0L)
+        stt.invalidateUtterance()
         tts.stop()
         chatViewModel.cancelResponse()
         chatViewModel.endVoiceSession()
@@ -170,9 +176,11 @@ fun VoiceModeScreen(
         )
         // #endregion
         // Hard stop, in order: 1) invalidate speech id so late TTS callbacks are rejected,
-        // 2) stop + clear TTS queue, 3) invalidate turn + native cancel + cancel job (cancelResponse),
-        // 4) clear local speaking state, 5) return to listening (also restarts STT accepting).
+        // 2) invalidate STT utterance id so a late recognizer final is rejected,
+        // 3) stop + clear TTS queue, 4) invalidate turn + native cancel + cancel job (cancelResponse),
+        // 5) clear local speaking state, 6) return to listening (also restarts STT accepting once).
         activeSpeechId.set(0L)
+        stt.invalidateUtterance()
         tts.stop()
         chatViewModel.cancelResponse()
         spokenChars = 0
@@ -194,14 +202,35 @@ fun VoiceModeScreen(
         liveTranscript = ""
         stt.clearText()
         stt.setAcceptingUtterance(true)
-        stt.onUtteranceComplete = { text ->
+        stt.onUtteranceComplete = { utteranceId, text ->
             scope.launch(Dispatchers.Main) {
-                if (phase != VoiceTalkPhase.Listening) return@launch
+                // Only accept a final while actually listening, and only once per utterance id — so
+                // one spoken utterance produces exactly one turn (a re-spoken phrase gets a new id).
+                if (phase != VoiceTalkPhase.Listening) {
+                    VoiceDebugLog.log(
+                        "F", "VoiceModeScreen.onUtteranceComplete", "final ignored (not listening)",
+                        mapOf("uid" to utteranceId, "phase" to phase.name),
+                    )
+                    return@launch
+                }
+                if (!VoiceLogic.canSubmitUtterance(utteranceId, lastSubmittedUtteranceId)) {
+                    VoiceDebugLog.log(
+                        "F", "VoiceModeScreen.onUtteranceComplete", "duplicate/stale final rejected",
+                        mapOf("uid" to utteranceId, "lastSubmitted" to lastSubmittedUtteranceId),
+                    )
+                    return@launch
+                }
+                lastSubmittedUtteranceId = utteranceId
+                VoiceDebugLog.log(
+                    "F", "VoiceModeScreen.onUtteranceComplete", "final accepted -> turn",
+                    mapOf("uid" to utteranceId, "len" to text.length),
+                )
                 liveTranscript = text
                 voiceNotice = null
                 spokenChars = 0
                 phase = VoiceTalkPhase.Thinking
                 stt.setAcceptingUtterance(false)
+                stt.invalidateUtterance() // generation start invalidates the STT id
                 // AI is silent while thinking — don't arm mic barge-in here, or the tail
                 // of the user's speech / room noise cancels the reply before it exists.
                 stt.setBargeInEnabled(enabled = false)
@@ -226,8 +255,10 @@ fun VoiceModeScreen(
                 }
             }
         }
-        stt.onPartialText = { text ->
+        stt.onPartialText = { _, text ->
             scope.launch(Dispatchers.Main) {
+                // SttManager already gates partials to the active utterance id; only surface them
+                // while listening.
                 if (phase == VoiceTalkPhase.Listening) {
                     liveTranscript = text
                 }
@@ -295,17 +326,41 @@ fun VoiceModeScreen(
         chatViewModel.loadActiveModel()
     }
 
-    // Durable reconciliation: the completed reply lives in ChatViewModel's voiceTurn StateFlow, not
-    // in a one-shot event. Keying on (sequence, phase) means a recomposition or screen re-entry
-    // re-reads the latest terminal state, so a finished turn can never stay stuck on Thinking even
-    // if this collector was momentarily gone. VoiceLogic.shouldHandleTerminal makes it fire once.
+    // Durable reconciliation: the completed reply lives in ChatViewModel's voiceTurn StateFlow. A
+    // terminal (ReadyToSpeak/Error) is acted on at most once, and only while the screen was actually
+    // processing this turn (local phase == Thinking). This kills the Listening loop:
+    //  - an already-consumed terminal, an inactive session, or a re-entry replay (local phase not
+    //    Thinking) is consumed WITHOUT reopening the mic/TTS;
+    //  - consumption is durable in the ViewModel, so leaving and re-entering the screen cannot replay
+    //    an old ReadyToSpeak/Error.
+    // Keyed on (sequence, phase) — NOT on `consumed` — so marking consumed here does not cancel this
+    // running effect (important for the Error settle delay below).
     LaunchedEffect(voiceTurn.sequence, voiceTurn.phase) {
-        when (voiceTurn.phase) {
+        val vt = voiceTurn
+        if (vt.phase != VoicePhase.ReadyToSpeak && vt.phase != VoicePhase.Error) return@LaunchedEffect
+        val screenWasProcessing = phase == VoiceTalkPhase.Thinking
+        VoiceDebugLog.log(
+            "G", "VoiceModeScreen.terminal", "terminal received",
+            mapOf(
+                "seq" to vt.sequence, "phase" to vt.phase.name, "consumed" to vt.consumed,
+                "session" to sessionActive, "screenThinking" to screenWasProcessing,
+            ),
+        )
+        if (!VoiceLogic.shouldConsumeTerminal(vt.consumed, sessionActive, screenWasProcessing)) {
+            // Not ours to act on. Consume so the durable state cannot keep re-triggering, but never
+            // reopen STT/TTS (prevents the re-entry replay and stale-turn resume).
+            if (!vt.consumed) chatViewModel.consumeVoiceTerminal(vt.sequence)
+            VoiceDebugLog.log(
+                "G", "VoiceModeScreen.terminal", "terminal ignored (guard)",
+                mapOf("seq" to vt.sequence, "phase" to vt.phase.name),
+            )
+            return@LaunchedEffect
+        }
+        // Consume up-front so this exact terminal is handled once (and cannot replay on re-entry).
+        chatViewModel.consumeVoiceTerminal(vt.sequence)
+        when (vt.phase) {
             VoicePhase.ReadyToSpeak -> {
-                if (!VoiceLogic.shouldHandleTerminal(voiceTurn.sequence, lastHandledVoiceSeq)) return@LaunchedEffect
-                if (!sessionActive) return@LaunchedEffect
-                lastHandledVoiceSeq = voiceTurn.sequence
-                val text = voiceTurn.finalText.orEmpty()
+                val text = vt.finalText.orEmpty()
                 val first = VoiceSpeakPlanner.nextChunk(text, 0, false)
                 val action = VoiceLogic.successAction(
                     autoReadReplies = tts.autoReadReplies,
@@ -322,12 +377,12 @@ fun VoiceModeScreen(
                     chatViewModel.markVoiceSpeaking()
                     VoiceDebugLog.log(
                         "B", "VoiceModeScreen.readyToSpeak", "phase->Speaking",
-                        mapOf("turn" to voiceTurn.turnId, "speechId" to sid, "len" to text.length),
+                        mapOf("turn" to vt.turnId, "speechId" to sid, "len" to text.length),
                     )
                     tts.speak(first.first, sid)
                 } else {
                     // Read-aloud off / TTS unavailable / nothing speakable: don't get stuck — the
-                    // answer is already visible in chat, so return straight to listening.
+                    // answer is already visible in chat, so return straight to listening (once).
                     VoiceDebugLog.log(
                         "A", "VoiceModeScreen.readyToSpeak", "no-speak -> Listening",
                         mapOf("autoRead" to tts.autoReadReplies, "ready" to tts.isReady.value),
@@ -336,10 +391,13 @@ fun VoiceModeScreen(
                 }
             }
             VoicePhase.Error -> {
-                if (!VoiceLogic.shouldHandleTerminal(voiceTurn.sequence, lastHandledVoiceSeq)) return@LaunchedEffect
-                lastHandledVoiceSeq = voiceTurn.sequence
-                voiceNotice = voiceTurn.error
-                if (sessionActive && phase != VoiceTalkPhase.Inactive) resumeListening()
+                voiceNotice = vt.error
+                // Do NOT rapid-retry: settle briefly so the cancelled recognizer releases, then
+                // reopen listening exactly once (only if this session is still valid and idle).
+                delay(ERROR_SETTLE_MS)
+                if (sessionActive && phase == VoiceTalkPhase.Thinking) {
+                    resumeListening()
+                }
             }
             else -> Unit
         }

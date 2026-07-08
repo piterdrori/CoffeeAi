@@ -55,15 +55,67 @@ class VoiceLogicTest {
         assertFalse(VoiceLogic.isStaleSpeechCallback(callbackSpeechId = 6L, activeSpeechId = 6L))
     }
 
-    // Test 21 — the same ReadyToSpeak sequence cannot start TTS twice (idempotent reconciliation).
+    // ---------------- Recovery-fix guards (terminal consumption + utterance identity) ----------
+
+    // Test 1/4 — a terminal is handled once, while the screen was mid-turn in an active session.
     @Test
-    fun shouldHandleTerminal_onlyNewerSequences() {
-        assertTrue(VoiceLogic.shouldHandleTerminal(sequence = 1L, lastHandledSequence = 0L))
-        // Re-reading the same completed state (recomposition / re-subscription) must NOT re-fire.
-        assertFalse(VoiceLogic.shouldHandleTerminal(sequence = 1L, lastHandledSequence = 1L))
-        // A stale/older sequence is also ignored.
-        assertFalse(VoiceLogic.shouldHandleTerminal(sequence = 1L, lastHandledSequence = 2L))
-        // The next turn's outcome is handled.
-        assertTrue(VoiceLogic.shouldHandleTerminal(sequence = 3L, lastHandledSequence = 2L))
+    fun shouldConsumeTerminal_handledOnceWhileProcessing() {
+        assertTrue(
+            VoiceLogic.shouldConsumeTerminal(consumed = false, sessionActive = true, screenWasProcessing = true),
+        )
+        // Already consumed -> not handled again (no repeated resume / no double TTS).
+        assertFalse(
+            VoiceLogic.shouldConsumeTerminal(consumed = true, sessionActive = true, screenWasProcessing = true),
+        )
+    }
+
+    // Test 2 — a terminal replayed after screen re-entry (not mid-turn) is rejected.
+    @Test
+    fun shouldConsumeTerminal_rejectedOnReEntry() {
+        assertFalse(
+            VoiceLogic.shouldConsumeTerminal(consumed = false, sessionActive = true, screenWasProcessing = false),
+        )
+    }
+
+    // Test 3 — a terminal with no active session does not resume listening.
+    @Test
+    fun shouldConsumeTerminal_rejectedWhenSessionInactive() {
+        assertFalse(
+            VoiceLogic.shouldConsumeTerminal(consumed = false, sessionActive = false, screenWasProcessing = true),
+        )
+    }
+
+    // Test 6/7 — only the active utterance id may emit live text; 0 (invalidated) is rejected.
+    @Test
+    fun isActiveUtterance_onlyMatchingNonZero() {
+        assertTrue(VoiceLogic.isActiveUtterance(callbackUtteranceId = 7L, activeUtteranceId = 7L))
+        assertFalse(VoiceLogic.isActiveUtterance(callbackUtteranceId = 6L, activeUtteranceId = 7L))
+        // After Stop AI / exit / generation start invalidates (active = 0), any callback is stale.
+        assertFalse(VoiceLogic.isActiveUtterance(callbackUtteranceId = 7L, activeUtteranceId = 0L))
+        assertFalse(VoiceLogic.isActiveUtterance(callbackUtteranceId = 0L, activeUtteranceId = 0L))
+    }
+
+    // Test 5/8/9/11/12 — one utterance id submits exactly once; new ids (incl. repeated words) allowed.
+    @Test
+    fun canSubmitUtterance_identityBased() {
+        // First submit for a fresh id.
+        assertTrue(VoiceLogic.canSubmitUtterance(utteranceId = 3L, lastSubmittedUtteranceId = 0L))
+        // Same id cannot submit twice.
+        assertFalse(VoiceLogic.canSubmitUtterance(utteranceId = 3L, lastSubmittedUtteranceId = 3L))
+        // Invalidated id (0) — e.g. after Stop AI / exit — never submits.
+        assertFalse(VoiceLogic.canSubmitUtterance(utteranceId = 0L, lastSubmittedUtteranceId = 3L))
+        // A new utterance after a completed turn is accepted (Test 8) — even if the user repeats the
+        // exact same words, because it is a new id (Test 9).
+        assertTrue(VoiceLogic.canSubmitUtterance(utteranceId = 4L, lastSubmittedUtteranceId = 3L))
+    }
+
+    // Test 10 — generation/speech state prevents opening STT for a new listen.
+    @Test
+    fun canAcceptListening_blockedWhileBusy() {
+        assertTrue(VoiceLogic.canAcceptListening(isLoading = false, generating = false, thinking = false, speaking = false))
+        assertFalse(VoiceLogic.canAcceptListening(isLoading = true, generating = false, thinking = false, speaking = false))
+        assertFalse(VoiceLogic.canAcceptListening(isLoading = false, generating = true, thinking = false, speaking = false))
+        assertFalse(VoiceLogic.canAcceptListening(isLoading = false, generating = false, thinking = true, speaking = false))
+        assertFalse(VoiceLogic.canAcceptListening(isLoading = false, generating = false, thinking = false, speaking = true))
     }
 }
