@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -160,8 +161,12 @@ def _detect_lan_ip() -> str | None:
 async def connection_hints() -> dict[str, Any]:
     lan_ip = _detect_lan_ip()
     port = settings.PORT
+    vercel_host = os.getenv("VERCEL_URL", "").strip()
+    cloud_url = f"https://{vercel_host}" if vercel_host else None
     return {
-        "api_key_hint": settings.API_KEY,
+        "cloud_url": cloud_url,
+        "bootstrap_required": True,
+        "local_backend_supported": True,
         "phone_url": f"http://{lan_ip}:{port}" if lan_ip else None,
         "emulator_url": f"http://10.0.2.2:{port}",
         "local_url": f"http://localhost:{port}",

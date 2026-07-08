@@ -132,8 +132,8 @@ def test_database_unavailable_health_and_register():
     class UnavailableStore(InMemoryDeviceStore):
         durable = True
 
-        async def health(self) -> bool:
-            return False
+        async def health(self) -> dict[str, bool | str]:
+            return {"readable": False, "writable": False}
 
         async def get_by_install_id(self, install_id):
             raise DeviceStoreUnavailable("down")
@@ -143,6 +143,7 @@ def test_database_unavailable_health_and_register():
     health = client.get("/v1/health/database").json()
     assert health["status"] == "degraded"
     assert health["database"] == "unavailable"
+    assert health["readable"] is False
     # Register should fail safe with 503, not 500.
     assert register(client).status_code == 503
 
@@ -183,3 +184,5 @@ def test_health_reports_durability_flag():
     body = client.get("/v1/health/database").json()
     assert body["status"] == "ok"
     assert body["durable"] is False
+    assert body["readable"] is True
+    assert body["writable"] is True

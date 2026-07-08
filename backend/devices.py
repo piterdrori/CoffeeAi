@@ -27,6 +27,11 @@ from typing import Any
 import httpx
 
 from config import settings
+from supabase_rest import (
+    SupabaseKeyError,
+    build_supabase_rest_headers,
+    device_store_http_error,
+)
 
 # install_id is a client-generated opaque id (UUID/token). Constrain length + charset defensively.
 _INSTALL_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
@@ -64,7 +69,7 @@ class DeviceStore(ABC):
     durable: bool = False
 
     @abstractmethod
-    async def health(self) -> bool: ...
+    async def health(self) -> dict[str, bool | str]: ...
 
     @abstractmethod
     async def get_by_install_id(self, install_id: str) -> dict[str, Any] | None: ...
@@ -90,8 +95,8 @@ class InMemoryDeviceStore(DeviceStore):
     def __init__(self) -> None:
         self._by_id: dict[str, dict[str, Any]] = {}
 
-    async def health(self) -> bool:
-        return True
+    async def health(self) -> dict[str, bool | str]:
+        return {"readable": True, "writable": True}
 
     async def get_by_install_id(self, install_id: str) -> dict[str, Any] | None:
         for row in self._by_id.values():
@@ -153,23 +158,54 @@ class SupabaseDeviceStore(DeviceStore):
 
     def __init__(self, url: str, service_role_key: str, timeout: float = 5.0) -> None:
         self._base = f"{url.rstrip('/')}/rest/v1"
-        self._headers = {
-            "apikey": service_role_key,
-            "Authorization": f"Bearer {service_role_key}",
-            "Content-Type": "application/json",
-        }
+        self._headers = build_supabase_rest_headers(service_role_key)
         self._timeout = timeout
 
     async def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=self._timeout, headers=self._headers)
 
-    async def health(self) -> bool:
+    async def health(self) -> dict[str, bool | str]:
+        readable = False
+        writable: bool | str = False
         try:
             async with await self._client() as client:
                 resp = await client.get(f"{self._base}/devices", params={"select": "id", "limit": 1})
-            return resp.status_code == 200
+                readable = resp.status_code == 200
         except httpx.HTTPError:
-            return False
+            return {"readable": False, "writable": False}
+
+        if not readable:
+            return {"readable": False, "writable": False}
+
+        probe_install = f"healthprobe{uuid.uuid4().hex[:16]}"
+        payload = {
+            "install_id": probe_install,
+            "token_hash": "0" * 64,
+            "platform": "health",
+            "app_version": None,
+        }
+        try:
+            async with await self._client() as client:
+                resp = await client.post(
+                    f"{self._base}/devices",
+                    params={"select": "id"},
+                    headers={**self._headers, "Prefer": "return=representation"},
+                    json=payload,
+                )
+                resp.raise_for_status()
+                rows = resp.json()
+                row_id = rows[0]["id"] if isinstance(rows, list) and rows else None
+                writable = True
+                if row_id:
+                    await client.delete(
+                        f"{self._base}/devices",
+                        params={"id": f"eq.{row_id}"},
+                    )
+        except httpx.HTTPError as exc:
+            device_store_http_error("health_write_probe", exc)
+            writable = False
+
+        return {"readable": readable, "writable": writable}
 
     async def get_by_install_id(self, install_id: str) -> dict[str, Any] | None:
         try:
@@ -181,6 +217,7 @@ class SupabaseDeviceStore(DeviceStore):
                 resp.raise_for_status()
                 rows = resp.json()
         except httpx.HTTPError as exc:
+            device_store_http_error("get_by_install_id", exc)
             raise DeviceStoreUnavailable(str(exc)) from exc
         return rows[0] if rows else None
 
@@ -202,6 +239,7 @@ class SupabaseDeviceStore(DeviceStore):
                 resp.raise_for_status()
                 rows = resp.json()
         except httpx.HTTPError as exc:
+            device_store_http_error("create_device", exc)
             raise DeviceStoreUnavailable(str(exc)) from exc
         return rows[0] if isinstance(rows, list) else rows
 
@@ -224,6 +262,7 @@ class SupabaseDeviceStore(DeviceStore):
                 resp.raise_for_status()
                 rows = resp.json()
         except httpx.HTTPError as exc:
+            device_store_http_error("rotate_token", exc)
             raise DeviceStoreUnavailable(str(exc)) from exc
         return rows[0] if isinstance(rows, list) and rows else payload | {"id": device_id}
 
@@ -242,6 +281,7 @@ class SupabaseDeviceStore(DeviceStore):
                 resp.raise_for_status()
                 rows = resp.json()
         except httpx.HTTPError as exc:
+            device_store_http_error("get_active_by_token_hash", exc)
             raise DeviceStoreUnavailable(str(exc)) from exc
         return rows[0] if rows else None
 
@@ -292,7 +332,10 @@ def get_device_store() -> DeviceStore:
     global _store
     if _store is None:
         if settings.supabase_enabled:
-            _store = SupabaseDeviceStore(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+            try:
+                _store = SupabaseDeviceStore(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+            except SupabaseKeyError as exc:
+                raise RuntimeError("invalid_supabase_server_key_configuration") from exc
         else:
             _store = InMemoryDeviceStore()
     return _store

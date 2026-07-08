@@ -25,13 +25,12 @@
       <div class="card-header"><h2>Connection</h2></div>
       <div class="card-body">
         <p style="margin-top: 0; color: var(--muted); font-size: 0.9rem;">
-          Password so the phone app can sync memory with this PC. Same value as
-          <code>API_KEY</code> in <code>backend/.env</code>.
+          Bootstrap API key for device registration and legacy sync. Set the same value in
+          <code>API_KEY</code> on the server and in the app Settings screen.
         </p>
         <label for="apiKey">API Key</label>
-        <p class="mono" id="apiKeyDefault" style="margin: 0 0 8px; color: var(--accent); font-size: 0.85rem;"></p>
         <div class="row">
-          <input type="password" id="apiKey" placeholder="dev-api-key-change-me" style="flex:1; margin-bottom:0;" />
+          <input type="password" id="apiKey" placeholder="Enter bootstrap API key" style="flex:1; margin-bottom:0;" />
           <button type="button" id="saveKeyBtn">Save & Refresh</button>
         </div>
       </div>
@@ -130,7 +129,6 @@
       modelProvider: null,
       model: null,
       embeddingModel: document.getElementById("embeddingModel"),
-      apiKeyDefault: document.getElementById("apiKeyDefault"),
       memoryCount: document.getElementById("memoryCount"),
       syncRevision: document.getElementById("syncRevision"),
       lastSync: document.getElementById("lastSync"),
@@ -302,9 +300,6 @@
     });
 
     els.apiKey.value = localStorage.getItem(STORAGE_KEY) || "";
-    fetch("/v1/connection-hints").then((r) => r.json()).then((h) => {
-      els.apiKeyDefault.textContent = `Default (dev): ${h.api_key_hint}`;
-    }).catch(() => {});
     loadHealth();
     if (getApiKey()) refreshAll().catch((err) => showToast(err.message));
   </script>

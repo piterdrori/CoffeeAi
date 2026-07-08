@@ -21,6 +21,11 @@ from typing import Any
 import httpx
 
 from config import settings
+from supabase_rest import (
+    SupabaseKeyError,
+    build_supabase_rest_headers,
+    memory_store_http_error,
+)
 
 ALLOWED_TYPES = ("profile", "episodic", "semantic", "procedural", "preference", "safety")
 ALLOWED_STATUSES = ("proposed", "approved", "superseded", "rejected", "deleted")
@@ -169,7 +174,7 @@ class MemoryStore(ABC):
     durable: bool = False
 
     @abstractmethod
-    async def health(self) -> bool: ...
+    async def health(self) -> dict[str, bool | str]: ...
 
     @abstractmethod
     async def get_summary(self, device_id: str, session_id: str) -> dict[str, Any] | None: ...
@@ -221,8 +226,8 @@ class InMemoryMemoryStore(MemoryStore):
         self.chunks: dict[str, dict[str, Any]] = {}
         self.audit: list[dict[str, Any]] = []
 
-    async def health(self) -> bool:
-        return True
+    async def health(self) -> dict[str, bool | str]:
+        return {"readable": True, "writable": True}
 
     async def get_summary(self, device_id, session_id):
         row = self.summaries.get((device_id, session_id))
@@ -385,11 +390,7 @@ class SupabaseMemoryStore(MemoryStore):
 
     def __init__(self, url: str, service_role_key: str, timeout: float = 5.0) -> None:
         self._base = f"{url.rstrip('/')}/rest/v1"
-        self._headers = {
-            "apikey": service_role_key,
-            "Authorization": f"Bearer {service_role_key}",
-            "Content-Type": "application/json",
-        }
+        self._headers = build_supabase_rest_headers(service_role_key)
         self._timeout = timeout
 
     def _client(self) -> httpx.AsyncClient:
@@ -402,6 +403,7 @@ class SupabaseMemoryStore(MemoryStore):
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPError as exc:
+            memory_store_http_error(f"get:{table}", exc)
             raise MemoryStoreUnavailable(str(exc)) from exc
 
     async def _insert(self, table: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -416,6 +418,7 @@ class SupabaseMemoryStore(MemoryStore):
                 resp.raise_for_status()
                 rows = resp.json()
         except httpx.HTTPError as exc:
+            memory_store_http_error(f"insert:{table}", exc)
             raise MemoryStoreUnavailable(str(exc)) from exc
         return rows[0] if isinstance(rows, list) and rows else payload
 
@@ -431,15 +434,18 @@ class SupabaseMemoryStore(MemoryStore):
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPError as exc:
+            memory_store_http_error(f"patch:{table}", exc)
             raise MemoryStoreUnavailable(str(exc)) from exc
 
-    async def health(self) -> bool:
+    async def health(self) -> dict[str, bool | str]:
+        readable = False
         try:
             async with self._client() as client:
                 resp = await client.get(f"{self._base}/memory_items", params={"select": "id", "limit": 1})
-            return resp.status_code == 200
+                readable = resp.status_code == 200
         except httpx.HTTPError:
-            return False
+            return {"readable": False, "writable": "unknown"}
+        return {"readable": readable, "writable": "unknown"}
 
     async def get_summary(self, device_id, session_id):
         rows = await self._get("conversation_summaries", {
@@ -477,6 +483,7 @@ class SupabaseMemoryStore(MemoryStore):
                 resp.raise_for_status()
             return True
         except httpx.HTTPError as exc:
+            memory_store_http_error("delete:conversation_summaries", exc)
             raise MemoryStoreUnavailable(str(exc)) from exc
 
     async def create_memory(self, device_id, data):
@@ -552,6 +559,7 @@ class SupabaseMemoryStore(MemoryStore):
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPError as exc:
+            memory_store_http_error("insert:knowledge_chunks", exc)
             raise MemoryStoreUnavailable(str(exc)) from exc
 
     async def list_knowledge_chunks(self, product, locale, limit):
@@ -579,7 +587,10 @@ def get_memory_store() -> MemoryStore:
     global _store
     if _store is None:
         if settings.supabase_enabled:
-            _store = SupabaseMemoryStore(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+            try:
+                _store = SupabaseMemoryStore(settings.SUPABASE_URL, settings.SUPABASE_SERVICE_ROLE_KEY)
+            except SupabaseKeyError as exc:
+                raise RuntimeError("invalid_supabase_server_key_configuration") from exc
         else:
             _store = InMemoryMemoryStore()
     return _store

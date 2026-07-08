@@ -118,11 +118,20 @@ async def device_me(device_id: str = Depends(require_device)) -> dict[str, Any]:
 @router.get("/v1/health/database")
 async def health_database(store: DeviceStore = Depends(store_dependency)) -> dict[str, Any]:
     try:
-        ok = await store.health()
+        status = await store.health()
     except Exception:  # noqa: BLE001
-        ok = False
-    return {
+        status = {"readable": False, "writable": False}
+    readable = bool(status.get("readable"))
+    writable = status.get("writable")
+    ok = readable
+    body: dict[str, Any] = {
         "status": "ok" if ok else "degraded",
         "database": "connected" if ok else "unavailable",
         "durable": store.durable,
+        "readable": readable,
     }
+    if isinstance(writable, bool):
+        body["writable"] = writable
+    else:
+        body["writable"] = "unknown"
+    return body
