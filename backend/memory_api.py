@@ -1,6 +1,7 @@
-"""Stage 2 memory API: Memory Context Packet, session summaries, memory CRUD, and an admin-only
-knowledge ingestion path. Device-owned routes authenticate with the Stage 1 bearer token and are
-always filtered by ``request.state.device_id`` — device_id is NEVER taken from the request body.
+"""Stage 2/3 memory API: Memory Context Packet, session summaries, memory CRUD, and an admin-only
+knowledge ingestion path. Stage 3 adds deterministic retrieval/ranking (``memory_retrieval``).
+Device-owned routes authenticate with the Stage 1 bearer token and are always filtered by
+``request.state.device_id`` — device_id is NEVER taken from the request body.
 """
 from __future__ import annotations
 
@@ -12,13 +13,12 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from devices_api import require_device
+from memory_retrieval import retrieve_and_pack_context
 from memory_store import (
     ALLOWED_STATUSES,
     ALLOWED_TYPES,
     MemoryStore,
     MemoryStoreUnavailable,
-    PROFILE_TYPES,
-    RETRIEVAL_TYPES,
     empty_packet,
     estimate_tokens,
     get_memory_store,
@@ -37,11 +37,9 @@ MEMORY_DEVICE_SCOPED_PREFIXES = (
     "/v1/memory/knowledge",
 )
 
-# Retrieval fan-out caps (deterministic; recency-ordered — no embeddings).
-_PROFILE_LIMIT = 6
-_SAFETY_LIMIT = 6
-_RELEVANT_LIMIT = 8
-_KNOWLEDGE_LIMIT = 6
+# Stage 3 retrieval fan-out caps (broader pool; ranking selects top items).
+_MEMORY_CANDIDATE_LIMIT = 100
+_KNOWLEDGE_CANDIDATE_LIMIT = 50
 
 
 def memory_store_dependency() -> MemoryStore:
@@ -100,27 +98,26 @@ async def memory_context(
 
     try:
         summary = await store.get_summary(device_id, body.session_id) if body.session_id else None
-        safety = await store.list_approved(device_id, ("safety",), _SAFETY_LIMIT)
-        profile = await store.list_approved(device_id, PROFILE_TYPES, _PROFILE_LIMIT)
-        relevant = await store.list_approved(device_id, RETRIEVAL_TYPES, _RELEVANT_LIMIT)
-        knowledge = (
-            await store.list_knowledge_chunks(product, language, _KNOWLEDGE_LIMIT) if product and product != "generic" else []
+        memories = await store.list_all_approved(device_id, _MEMORY_CANDIDATE_LIMIT)
+        knowledge = await store.list_knowledge_for_retrieval(
+            product, language, body.product_version, _KNOWLEDGE_CANDIDATE_LIMIT,
         )
     except MemoryStoreUnavailable:
         # Fail safe: a valid empty fallback packet so the Android app is never blocked on memory.
         return empty_packet(request_id, language, budget, fallback=True)
 
-    packet, usage = pack_context(
+    packet, usage = retrieve_and_pack_context(
         request_id=request_id,
         language=language,
         budget=budget,
+        query=body.query,
+        product=product,
+        product_version=body.product_version,
         summary=summary,
-        profile=profile,
-        safety=safety,
-        knowledge=knowledge,
-        relevant=relevant,
+        memories=memories,
+        knowledge_chunks=knowledge,
     )
-    # Privacy-safe audit: ids + counts only — never the query text or memory/response content.
+    # Privacy-safe audit: ids + counts + scores only — never query text or memory/content.
     background.add_task(_audit, store, {
         "device_id": device_id,
         "request_id": request_id,
@@ -132,7 +129,12 @@ async def memory_context(
             "memory_ids": usage["memory_ids"],
             "knowledge_ids": usage["knowledge_ids"],
             "used_token_estimate": usage["used_token_estimate"],
-            "query_len": len(body.query),
+            "query_len": usage["query_len"],
+            "retrieval_strategy": usage["retrieval_strategy"],
+            "candidate_count": usage["candidate_count"],
+            "selected_count": usage["selected_count"],
+            "score_range": usage["score_range"],
+            "audit_items": usage["audit_items"],
         },
     })
     return packet
@@ -336,6 +338,10 @@ async def delete_memory_item(
 
 
 # ---------------- Knowledge ingestion (admin-only) --------------------------------------------
+# Live smoke test (requires KNOWLEDGE_ADMIN_KEY env var — never expose publicly):
+#   curl -X POST .../v1/memory/knowledge/documents -H "X-Admin-Key: $KNOWLEDGE_ADMIN_KEY" ...
+#   curl -X DELETE .../v1/memory/knowledge/documents/{document_id} -H "X-Admin-Key: ..."
+# Device bearer tokens cannot create or delete knowledge documents.
 
 class KnowledgeChunkInput(BaseModel):
     chunk_index: int | None = None
@@ -379,3 +385,25 @@ async def create_knowledge_document(
         "details": {"document_id": doc["id"], "chunk_count": len(chunks), "product": body.product},
     })
     return {"document_id": doc["id"], "chunk_count": len(chunks)}
+
+
+@router.delete("/v1/memory/knowledge/documents/{document_id}")
+async def delete_knowledge_document(
+    document_id: str,
+    background: BackgroundTasks,
+    _admin: str = Depends(require_admin),
+    store: MemoryStore = Depends(memory_store_dependency),
+) -> dict[str, Any]:
+    """Admin-only maintenance delete for test knowledge cleanup."""
+    try:
+        deleted = await store.delete_knowledge_document(document_id)
+    except MemoryStoreUnavailable:
+        raise HTTPException(status_code=503, detail="memory_store_unavailable")
+    if not deleted:
+        raise HTTPException(status_code=404, detail="document_not_found")
+    background.add_task(_audit, store, {
+        "device_id": None, "request_id": str(uuid.uuid4()), "actor": "admin",
+        "action": "knowledge_delete", "memory_id": None,
+        "details": {"document_id": document_id},
+    })
+    return {"deleted": True, "document_id": document_id}

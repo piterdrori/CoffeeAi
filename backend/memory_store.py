@@ -155,7 +155,7 @@ def pack_context(
 def empty_packet(request_id: str, language: str, budget: int, *, fallback: bool = False) -> dict[str, Any]:
     return {
         "request_id": request_id,
-        "memory_version": 1,
+        "memory_version": 2,
         "intent": "unknown",
         "language": language,
         "user_profile": [],
@@ -166,6 +166,9 @@ def empty_packet(request_id: str, language: str, budget: int, *, fallback: bool 
         "context_token_budget": budget,
         "used_token_estimate": 0,
         "categories_used": [],
+        "retrieval_strategy": "deterministic-v1",
+        "candidate_count": 0,
+        "selected_count": 0,
         "fallback": fallback,
     }
 
@@ -204,6 +207,9 @@ class MemoryStore(ABC):
     async def list_approved(self, device_id: str, types: tuple[str, ...], limit: int) -> list[dict[str, Any]]: ...
 
     @abstractmethod
+    async def list_all_approved(self, device_id: str, limit: int) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
     async def create_document(self, data: dict[str, Any]) -> dict[str, Any]: ...
 
     @abstractmethod
@@ -211,6 +217,14 @@ class MemoryStore(ABC):
 
     @abstractmethod
     async def list_knowledge_chunks(self, product: str, locale: str, limit: int) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def list_knowledge_for_retrieval(
+        self, product: str, locale: str, product_version: str | None, limit: int,
+    ) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def delete_knowledge_document(self, document_id: str) -> bool: ...
 
     @abstractmethod
     async def write_audit(self, entry: dict[str, Any]) -> None: ...
@@ -336,6 +350,9 @@ class InMemoryMemoryStore(MemoryStore):
         rows.sort(key=lambda r: r["updated_at"], reverse=True)
         return [dict(r) for r in rows[:limit]]
 
+    async def list_all_approved(self, device_id, limit):
+        return await self.list_approved(device_id, ALLOWED_TYPES, limit)
+
     async def create_document(self, data):
         now = utc_now_iso()
         row = {
@@ -378,6 +395,40 @@ class InMemoryMemoryStore(MemoryStore):
         rows = [dict(c) for c in self.chunks.values() if c["document_id"] in doc_ids]
         rows.sort(key=lambda c: c["chunk_index"])
         return rows[:limit]
+
+    async def list_knowledge_for_retrieval(self, product, locale, product_version, limit):
+        """Return chunks enriched with parent document metadata for Stage 3 ranking."""
+        del product_version  # tier logic lives in memory_retrieval.filter_knowledge_candidates
+        req_locale = (locale or "en").lower()[:8]
+        products = {product}
+        if product and product != "generic":
+            products.add("coffeeai")
+        out: list[dict[str, Any]] = []
+        for doc in self.documents.values():
+            if doc["status"] != "active":
+                continue
+            if doc["product"] not in products:
+                continue
+            doc_locale = (doc.get("locale") or "").lower()
+            if doc_locale != req_locale and doc_locale[:2] != req_locale[:2]:
+                continue
+            for chunk in self.chunks.values():
+                if chunk["document_id"] != doc["id"]:
+                    continue
+                row = dict(chunk)
+                row["_document"] = dict(doc)
+                out.append(row)
+        out.sort(key=lambda c: (c["_document"]["product"], c.get("chunk_index", 0)))
+        return out[:limit]
+
+    async def delete_knowledge_document(self, document_id):
+        if document_id not in self.documents:
+            return False
+        chunk_ids = [cid for cid, c in self.chunks.items() if c["document_id"] == document_id]
+        for cid in chunk_ids:
+            del self.chunks[cid]
+        del self.documents[document_id]
+        return True
 
     async def write_audit(self, entry):
         self.audit.append(dict(entry))
@@ -536,6 +587,13 @@ class SupabaseMemoryStore(MemoryStore):
             "type": f"in.({type_filter})", "select": "*", "order": "updated_at.desc", "limit": limit,
         })
 
+    async def list_all_approved(self, device_id, limit):
+        type_filter = ",".join(ALLOWED_TYPES)
+        return await self._get("memory_items", {
+            "device_id": f"eq.{device_id}", "deleted_at": "is.null", "status": "eq.approved",
+            "type": f"in.({type_filter})", "select": "*", "order": "updated_at.desc", "limit": limit,
+        })
+
     async def create_document(self, data):
         return await self._insert("knowledge_documents", data)
 
@@ -572,6 +630,54 @@ class SupabaseMemoryStore(MemoryStore):
         return await self._get("knowledge_chunks", {
             "document_id": f"in.({ids})", "select": "*", "order": "chunk_index.asc", "limit": limit,
         })
+
+    async def list_knowledge_for_retrieval(self, product, locale, product_version, limit):
+        del product_version
+        if not product or product == "generic":
+            return []
+        req_locale = (locale or "en").lower()[:8]
+        docs = await self._get("knowledge_documents", {
+            "status": "eq.active",
+            "product": f"in.({product},coffeeai)",
+            "select": "id,product,title,version,locale,trust_level,source,status,metadata,created_at,updated_at",
+            "limit": 200,
+        })
+        eligible = [
+            d for d in docs
+            if (d.get("locale") or "").lower() == req_locale
+            or (d.get("locale") or "").lower()[:2] == req_locale[:2]
+        ]
+        if not eligible:
+            return []
+        ids = ",".join(d["id"] for d in eligible)
+        chunks = await self._get("knowledge_chunks", {
+            "document_id": f"in.({ids})", "select": "*", "order": "chunk_index.asc", "limit": limit,
+        })
+        doc_by_id = {d["id"]: d for d in eligible}
+        out: list[dict[str, Any]] = []
+        for chunk in chunks:
+            doc = doc_by_id.get(chunk["document_id"])
+            if not doc:
+                continue
+            row = dict(chunk)
+            row["_document"] = doc
+            out.append(row)
+        return out
+
+    async def delete_knowledge_document(self, document_id):
+        try:
+            async with self._client() as client:
+                await client.delete(f"{self._base}/knowledge_chunks", params={
+                    "document_id": f"eq.{document_id}",
+                })
+                resp = await client.delete(f"{self._base}/knowledge_documents", params={
+                    "id": f"eq.{document_id}",
+                })
+                resp.raise_for_status()
+            return True
+        except httpx.HTTPError as exc:
+            memory_store_http_error("delete:knowledge_documents", exc)
+            raise MemoryStoreUnavailable(str(exc)) from exc
 
     async def write_audit(self, entry):
         try:

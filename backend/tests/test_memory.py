@@ -64,6 +64,7 @@ def test_empty_context_packet():
     assert body["safety_rules"] == [] and body["recent_summary"] is None
     assert body["fallback"] is False
     assert body["used_token_estimate"] == 0
+    assert body["memory_version"] == 2
 
 
 # 2 — missing / invalid bearer rejected
@@ -190,6 +191,7 @@ def test_audit_created_without_query_or_content():
     assert secret_query not in blob
     assert "SENSITIVE-MEMORY-CONTENT" not in blob  # ids only, never content
     assert ctx_events[-1]["details"]["query_len"] == len(secret_query)
+    assert ctx_events[-1]["details"]["retrieval_strategy"] == "deterministic-v1"
 
 
 # 14 — memory CRUD is device-scoped
@@ -227,7 +229,10 @@ def test_database_unavailable_fails_safe():
         async def get_summary(self, *a, **k):
             raise MemoryStoreUnavailable("down")
 
-        async def list_approved(self, *a, **k):
+        async def list_all_approved(self, *a, **k):
+            raise MemoryStoreUnavailable("down")
+
+        async def list_knowledge_for_retrieval(self, *a, **k):
             raise MemoryStoreUnavailable("down")
 
     app.dependency_overrides[devices_api.store_dependency] = lambda: dev_store
