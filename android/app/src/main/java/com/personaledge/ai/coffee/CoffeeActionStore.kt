@@ -50,15 +50,8 @@ class CoffeeActionStore(context: Context) {
         )
     }
 
-    fun toMachineCommand(recipe: CoffeeRecipeEntity, beanProfile: String? = null): MachineCommand = MachineCommand.BrewRecipe(
-        recipeId = recipe.id,
-        displayName = recipe.name,
-        groundCoffeeGrams = recipe.groundCoffeeGrams,
-        waterMl = recipe.waterMl,
-        milkMl = recipe.milkMl,
-        milkFoamMl = recipe.milkFoamMl,
-        beanProfile = beanProfile,
-    )
+    // Favorite recipes are executed deterministically (see ChatViewModel.brewFavorite); they are
+    // intentionally NOT converted into an LLM text command.
 
     companion object {
         fun defaultQuickActions(): List<QuickActionEntity> = listOf(
@@ -148,6 +141,8 @@ class CoffeeActionStore(context: Context) {
             waterMl: Int,
             milkMl: Int,
             milkFoamMl: Int,
+            hasMilk: Boolean = true,
+            shotCount: Int = 1,
             id: String = UUID.randomUUID().toString(),
         ): CoffeeRecipeEntity {
             val now = System.currentTimeMillis()
@@ -160,6 +155,8 @@ class CoffeeActionStore(context: Context) {
                 milkFoamMl = milkFoamMl,
                 createdAt = now,
                 updatedAt = now,
+                hasMilk = hasMilk,
+                shotCount = shotCount,
             )
         }
     }

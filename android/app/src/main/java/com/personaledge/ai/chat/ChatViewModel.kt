@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.personaledge.ai.EdgeAiApplication
 import com.personaledge.ai.coffee.BrewState
 import com.personaledge.ai.coffee.BrewStatus
+import com.personaledge.ai.coffee.CoffeeRecipeEntity
+import com.personaledge.ai.coffee.CoffeeRecipeLogic
 import com.personaledge.ai.coffee.MachineCommand
 import android.os.SystemClock
 import com.personaledge.ai.inference.ChatTurn
@@ -129,6 +131,9 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         // The inter-token budget is what actually catches a real stall once tokens are flowing.
         const val FIRST_TOKEN_TIMEOUT_MS = 40_000L
         const val INTER_TOKEN_TIMEOUT_MS = 12_000L
+        // Simulated per-stage durations for deterministic favorite brewing (no physical machine).
+        const val BREW_CYCLE_MS = 900L
+        const val BREW_MILK_MS = 700L
     }
 
     // ---------------- Single-flight generation lifecycle (shared by text + voice + commands) -----
@@ -941,6 +946,62 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         resetGenerationUiState(cancelNative = true)
         job?.cancel()
         _brewState.value = BrewState()
+    }
+
+    /**
+     * Deterministic favorite-beverage execution — the source of truth is the structured recipe, not
+     * the LLM. Builds a [CoffeeRecipeLogic.BrewPlan] and drives the brew status through the stages
+     * itself: one coffee extraction cycle per shot (Single = 1, Double = 2), then a single milk/foam
+     * stage when the recipe has milk. The local model is NEVER asked to decide or interpret the brew.
+     *
+     * No physical machine driver exists yet, so the per-stage timing is SIMULATED; the chat log entry
+     * is app-generated (from the plan), never an LLM response.
+     */
+    fun brewFavorite(recipe: CoffeeRecipeEntity, sessionId: String) {
+        currentSessionId = sessionId
+        val plan = CoffeeRecipeLogic.brewPlan(
+            hasMilk = recipe.hasMilk,
+            shotCount = recipe.shotCount,
+            groundCoffeeGrams = recipe.groundCoffeeGrams,
+            waterMl = recipe.waterMl,
+            milkMl = recipe.milkMl,
+            milkFoamMl = recipe.milkFoamMl,
+        )
+        machineCommandJob?.cancel()
+        _brewState.value = BrewState(BrewStatus.Preparing, recipe.name)
+        machineCommandJob = viewModelScope.launch {
+            try {
+                ensureSessionInStore()
+                _uiState.update {
+                    it.copy(
+                        messages = it.messages + UiMessage("user", CoffeeRecipeLogic.brewRequestLine(recipe.name, plan)),
+                        error = null,
+                    )
+                }
+                _brewState.value = BrewState(BrewStatus.Brewing, recipe.name)
+                // Execution layer (simulated): actually loop once per shot so Double runs two cycles.
+                repeat(plan.coffeeCycles) {
+                    delay(BREW_CYCLE_MS)
+                }
+                if (plan.hasMilk) {
+                    delay(BREW_MILK_MS)
+                }
+                _uiState.update {
+                    it.copy(messages = it.messages + UiMessage("assistant", CoffeeRecipeLogic.brewSummary(recipe.name, plan)))
+                }
+                persistCurrentSession()
+                _brewState.value = BrewState(BrewStatus.Ready, recipe.name)
+                Log.i(
+                    TAG,
+                    "brewFavorite name=${recipe.name} cycles=${plan.coffeeCycles} hasMilk=${plan.hasMilk} " +
+                        "milkMl=${plan.milkMl} foamMl=${plan.milkFoamMl} (deterministic, no LLM)",
+                )
+            } catch (_: CancellationException) {
+                _brewState.value = BrewState()
+            } catch (e: Exception) {
+                _brewState.value = BrewState(BrewStatus.Error, recipe.name, e.message ?: "Brew failed")
+            }
+        }
     }
 
     suspend fun executeMachineCommand(command: MachineCommand, sessionId: String? = null) {

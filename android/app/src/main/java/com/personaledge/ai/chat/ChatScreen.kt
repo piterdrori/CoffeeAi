@@ -3,7 +3,6 @@ package com.personaledge.ai.chat
 import androidx.activity.compose.BackHandler
 import android.app.Activity
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,14 +14,11 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.VolumeOff
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
@@ -38,8 +34,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -61,7 +55,9 @@ import com.personaledge.ai.ui.theme.CoffeeBrown
 import com.personaledge.ai.ui.theme.CoffeeCream
 import com.personaledge.ai.ui.theme.CoffeeText
 import com.personaledge.ai.ui.theme.Error
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 private const val GREETING = "Hi! I'm CoffeeAI. What would you like to explore today?"
 
@@ -78,20 +74,32 @@ fun ChatScreen(
     val tts = app.ttsManager
     val state by viewModel.uiState.collectAsState()
     val listState = rememberLazyListState()
-    var autoTts by remember { mutableStateOf(true) }
-    var lastSpoken by remember { mutableStateOf("") }
     val view = LocalView.current
     val scope = rememberCoroutineScope()
 
-    fun setAutoTts(enabled: Boolean) {
-        autoTts = enabled
-        tts.autoReadReplies = enabled
-        if (!enabled) {
-            tts.stop()
-        }
-        scope.launch {
-            val config = app.syncClient.getBackendConfig()
-            app.syncClient.saveBackendConfig(config.copy(autoTts = enabled))
+    // Manual per-reply TTS. Only one reply plays at a time; a fresh speechId protects against stale
+    // completion callbacks (e.g. after switching replies or leaving the screen).
+    val speechSeq = remember { AtomicLong(0L) }
+    var activeSpeechId by remember { mutableStateOf(0L) }
+    var activeTtsMessageId by remember { mutableStateOf<String?>(null) }
+
+    fun stopManualTts() {
+        activeSpeechId = 0L
+        activeTtsMessageId = null
+        tts.stop()
+    }
+
+    fun onReplyTtsClick(message: UiMessage) {
+        when (ChatTtsLogic.resolveTap(message.id, activeTtsMessageId)) {
+            ChatTtsLogic.Tap.STOP -> stopManualTts()
+            ChatTtsLogic.Tap.START -> {
+                activeSpeechId = 0L // invalidate the prior reply's speech first
+                tts.stop()
+                val sid = speechSeq.incrementAndGet()
+                activeSpeechId = sid
+                activeTtsMessageId = message.id
+                tts.speak(message.content, sid)
+            }
         }
     }
 
@@ -107,23 +115,24 @@ fun ChatScreen(
     }
 
     DisposableEffect(Unit) {
-        onDispose { tts.stop() }
+        // Chat uses manual per-reply TTS only — never auto-read. Reject stale completions by id.
+        tts.onSpeakComplete = { completedSpeechId ->
+            scope.launch(Dispatchers.Main) {
+                if (ChatTtsLogic.isStaleCallback(completedSpeechId, activeSpeechId)) return@launch
+                activeTtsMessageId = null
+                activeSpeechId = 0L
+            }
+        }
+        onDispose {
+            tts.onSpeakComplete = null
+            activeSpeechId = 0L
+            activeTtsMessageId = null
+            tts.stop()
+        }
     }
 
     LaunchedEffect(Unit) {
-        autoTts = app.syncClient.getBackendConfig().autoTts
-        tts.autoReadReplies = autoTts
         viewModel.loadActiveModel()
-    }
-
-    LaunchedEffect(state.messages.lastOrNull()?.content, state.isLoading, autoTts) {
-        val last = state.messages.lastOrNull()
-        if (autoTts && !state.isLoading && last?.role == "assistant" && !last.isStreaming &&
-            last.content.isNotBlank() && last.content != lastSpoken
-        ) {
-            lastSpoken = last.content
-            tts.speak(last.content)
-        }
     }
 
     LaunchedEffect(state.messages.size) {
@@ -140,11 +149,7 @@ fun ChatScreen(
                 .fillMaxSize()
                 .statusBarsPadding(),
         ) {
-            LetsChatHeader(
-                onBack = onBack,
-                ttsEnabled = autoTts,
-                onToggleTts = { setAutoTts(!autoTts) },
-            )
+            LetsChatHeader(onBack = onBack)
 
             if (!state.isEngineReady && state.error != null) {
                 Text(
@@ -173,11 +178,19 @@ fun ChatScreen(
                 }
 
                 items(state.messages, key = { it.id }) { message ->
+                    val showTts = ChatTtsLogic.showButton(message.role, message.content, message.isStreaming)
                     CoffeeChatBubble(
                         role = message.role,
                         content = message.content,
                         isStreaming = message.isStreaming,
                         imageUri = message.imageUri,
+                        showTtsButton = showTts,
+                        isTtsPlaying = ChatTtsLogic.isPlaying(message.id, activeTtsMessageId),
+                        onTtsClick = if (showTts) {
+                            { onReplyTtsClick(message) }
+                        } else {
+                            null
+                        },
                     )
                 }
 
@@ -238,8 +251,6 @@ fun ChatScreen(
 @Composable
 private fun LetsChatHeader(
     onBack: (() -> Unit)?,
-    ttsEnabled: Boolean,
-    onToggleTts: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -270,48 +281,17 @@ private fun LetsChatHeader(
             color = CoffeeText,
         )
 
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            modifier = Modifier.padding(end = 8.dp),
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(end = 12.dp),
         ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(
-                        if (ttsEnabled) CoffeeBrown.copy(alpha = 0.14f) else Color.White.copy(alpha = 0.85f),
-                    )
-                    .clickable(onClick = onToggleTts),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = if (ttsEnabled) {
-                        Icons.AutoMirrored.Filled.VolumeUp
-                    } else {
-                        Icons.AutoMirrored.Filled.VolumeOff
-                    },
-                    contentDescription = if (ttsEnabled) {
-                        "Turn off read aloud"
-                    } else {
-                        "Turn on read aloud"
-                    },
-                    tint = if (ttsEnabled) CoffeeBrown else CoffeeText.copy(alpha = 0.45f),
-                    modifier = Modifier.size(22.dp),
-                )
-            }
-
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                CoffeeAiMark(modifier = Modifier.size(28.dp), color = CoffeeBrown)
-                Text(
-                    text = "CoffeeAI",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = CoffeeBrown,
-                )
-            }
+            CoffeeAiMark(modifier = Modifier.size(28.dp), color = CoffeeBrown)
+            Text(
+                text = "CoffeeAI",
+                fontSize = 10.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = CoffeeBrown,
+            )
         }
     }
 }

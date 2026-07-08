@@ -143,7 +143,7 @@ $gh = Get-Command gh -ErrorAction SilentlyContinue
 if (-not $gh) {
     Write-Warning "GitHub CLI (gh) not found — skipping cloud upload. Install: winget install GitHub.cli"
 } else {
-    $releaseNotes = "CoffeeAI $version — voice regression recovery: one spoken utterance now creates exactly one turn. Adds an STT utterance session id (stale/duplicate finals rejected), a durable one-shot terminal guard (no repeated Listening jumps, no re-entry replay), and a settle-then-resume-once error path (no rapid retry loop). Bounded history and perf metrics unchanged."
+    $releaseNotes = "CoffeeAI $version — Let's Chat now has a per-reply speaker button (tap any assistant reply to read it aloud; no more global auto-read). Favorite Beverages is a guided wizard (name, with/without milk, single/double shot, recipe controls, review) and now brews deterministically in-app (Single = one coffee cycle, Double = two, milk/foam once) without asking the LLM to interpret the recipe. Voice and history behavior unchanged."
     $view = & gh release view $tag --repo $githubRepo 2>&1
     if ($LASTEXITCODE -ne 0) {
         & gh release create $tag --repo $githubRepo --title "CoffeeAI $version" --notes $releaseNotes $ApkDest
@@ -170,7 +170,7 @@ $appMeta = @{
     apk_filename   = "personal-edge-ai.apk"
     apk_size_bytes = $size
     download_url   = $downloadUrl
-    notes          = "CoffeeAI v$version - one utterance = one turn, STT utterance id, durable terminal guard, no listening loop"
+    notes          = "CoffeeAI v$version - per-reply TTS in Let's Chat, guided favorite-beverage wizard, deterministic single/double brewing"
 }
 $appMeta | ConvertTo-Json | Set-Content -Path $appVersionPath -Encoding UTF8
 

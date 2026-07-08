@@ -46,27 +46,9 @@ sealed class MachineCommand {
         )
     }
 
-    data class BrewRecipe(
-        val recipeId: String,
-        override val displayName: String,
-        val groundCoffeeGrams: Int,
-        val waterMl: Int,
-        val milkMl: Int,
-        val milkFoamMl: Int,
-        val beanProfile: String? = null,
-    ) : MachineCommand() {
-        override fun toMessage(): String = buildBrewMessage(
-            displayName = displayName,
-            extraLines = buildList {
-                add("recipe_id: $recipeId")
-                add("ground_coffee_g: $groundCoffeeGrams")
-                add("water_ml: $waterMl")
-                add("milk_ml: $milkMl")
-                add("milk_foam_ml: $milkFoamMl")
-            },
-            beanProfile = beanProfile,
-        )
-    }
+    // NOTE: Favorite beverages (recipes) are executed by a DETERMINISTIC app path
+    // (ChatViewModel.brewFavorite → CoffeeRecipeLogic.brewPlan), never by asking the local LLM to
+    // interpret a text command. There is intentionally no LLM-oriented BrewRecipe command.
 
     data class MachineControl(
         val commandKey: String,

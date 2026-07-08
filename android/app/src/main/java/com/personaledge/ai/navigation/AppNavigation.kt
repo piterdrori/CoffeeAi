@@ -292,13 +292,10 @@ fun AppNavigation() {
 
                 scope.launch {
 
-                    val app = context.applicationContext as com.personaledge.ai.EdgeAiApplication
-                    val beans = app.profileStore.currentCoffeePreferences().machineContextBlock()
+                    // Deterministic favorite execution — structured recipe → BrewPlan, no LLM prompt.
                     val id = chatViewModel.prepareNewSession()
 
-                    val command = app.coffeeActionStore.toMachineCommand(recipe, beans)
-
-                    chatViewModel.executeMachineCommand(command, sessionId = id)
+                    chatViewModel.brewFavorite(recipe, sessionId = id)
 
                 }
 

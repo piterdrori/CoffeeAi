@@ -10,6 +10,8 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Entity(tableName = "coffee_recipes")
@@ -22,9 +24,20 @@ data class CoffeeRecipeEntity(
     val milkFoamMl: Int,
     val createdAt: Long,
     val updatedAt: Long,
+    // Added in DB v2. Existing rows are migrated: hasMilk inferred from stored milk/foam, shots = 1.
+    val hasMilk: Boolean = true,
+    val shotCount: Int = 1,
 ) {
     val summary: String
-        get() = "${groundCoffeeGrams}g · ${waterMl}ml water · ${milkMl}ml milk · ${milkFoamMl}ml foam"
+        get() {
+            val shots = if (shotCount >= 2) "Double" else "Single"
+            val coffee = "$shots · ${groundCoffeeGrams}g · ${waterMl}ml water"
+            return if (hasMilk) {
+                "$coffee · ${milkMl}ml milk · ${milkFoamMl}ml foam"
+            } else {
+                "$coffee · no milk"
+            }
+        }
 }
 
 @Entity(tableName = "quick_actions")
@@ -98,7 +111,7 @@ interface CoffeeActionDao {
 
 @Database(
     entities = [CoffeeRecipeEntity::class, QuickActionEntity::class, SavedTopicEntity::class],
-    version = 1,
+    version = 2,
     exportSchema = false,
 )
 abstract class CoffeeActionDatabase : RoomDatabase() {
@@ -108,13 +121,26 @@ abstract class CoffeeActionDatabase : RoomDatabase() {
         @Volatile
         private var instance: CoffeeActionDatabase? = null
 
+        /**
+         * v1 → v2: add the favorite-beverage milk-mode and shot-count columns. Non-destructive:
+         * existing recipes are preserved, hasMilk is inferred from stored milk/foam amounts, and
+         * shotCount defaults to Single(1).
+         */
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE coffee_recipes ADD COLUMN hasMilk INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("ALTER TABLE coffee_recipes ADD COLUMN shotCount INTEGER NOT NULL DEFAULT 1")
+                db.execSQL("UPDATE coffee_recipes SET hasMilk = 0 WHERE milkMl = 0 AND milkFoamMl = 0")
+            }
+        }
+
         fun getInstance(context: Context): CoffeeActionDatabase {
             return instance ?: synchronized(this) {
                 instance ?: Room.databaseBuilder(
                     context.applicationContext,
                     CoffeeActionDatabase::class.java,
                     "coffeeai_actions.db",
-                ).build().also { instance = it }
+                ).addMigrations(MIGRATION_1_2).build().also { instance = it }
             }
         }
     }

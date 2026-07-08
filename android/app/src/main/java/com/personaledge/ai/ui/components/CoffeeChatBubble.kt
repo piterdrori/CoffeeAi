@@ -1,6 +1,7 @@
 package com.personaledge.ai.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,6 +11,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -17,6 +22,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -31,6 +38,9 @@ fun CoffeeChatBubble(
     isStreaming: Boolean = false,
     imageUri: String? = null,
     modifier: Modifier = Modifier,
+    showTtsButton: Boolean = false,
+    isTtsPlaying: Boolean = false,
+    onTtsClick: (() -> Unit)? = null,
 ) {
     val isUser = role == "user"
     Row(
@@ -74,11 +84,46 @@ fun CoffeeChatBubble(
                     fontWeight = FontWeight.Normal,
                 )
             }
+
+            if (showTtsButton && onTtsClick != null) {
+                ReplyTtsButton(
+                    isPlaying = isTtsPlaying,
+                    onClick = onTtsClick,
+                    modifier = Modifier.padding(top = 4.dp, start = 2.dp),
+                )
+            }
         }
 
         if (isUser) {
             UserAvatar(modifier = Modifier.padding(start = 10.dp))
         }
+    }
+}
+
+@Composable
+private fun ReplyTtsButton(
+    isPlaying: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val label = if (isPlaying) "Stop reading this reply" else "Read this reply aloud"
+    Box(
+        modifier = modifier
+            .size(34.dp)
+            .clip(CircleShape)
+            .background(
+                if (isPlaying) CoffeeBrown.copy(alpha = 0.16f) else Color.White.copy(alpha = 0.85f),
+            )
+            .clickable(onClick = onClick)
+            .semantics { contentDescription = label },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = if (isPlaying) Icons.Default.Stop else Icons.AutoMirrored.Filled.VolumeUp,
+            contentDescription = null,
+            tint = if (isPlaying) CoffeeBrown else CoffeeText.copy(alpha = 0.55f),
+            modifier = Modifier.size(18.dp),
+        )
     }
 }
 
