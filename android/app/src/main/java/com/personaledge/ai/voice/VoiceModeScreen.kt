@@ -36,6 +36,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -56,7 +57,7 @@ import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.personaledge.ai.EdgeAiApplication
 import com.personaledge.ai.chat.ChatViewModel
-import com.personaledge.ai.chat.VoiceControl
+import com.personaledge.ai.chat.VoicePhase
 import com.personaledge.ai.ui.components.CoffeeAiMark
 import com.personaledge.ai.ui.components.LetsTalkPulseOrb
 import com.personaledge.ai.ui.theme.CoffeeBrown
@@ -86,6 +87,7 @@ fun VoiceModeScreen(
     val stt = app.sttManager
     val tts = app.ttsManager
     val chatState by chatViewModel.uiState.collectAsState()
+    val voiceTurn by chatViewModel.voiceTurn.collectAsState()
     val partial by stt.partialText.collectAsState()
     val sttError by stt.error.collectAsState()
     val isModelReady by stt.isModelReady.collectAsState()
@@ -106,6 +108,9 @@ fun VoiceModeScreen(
     val activeSpeechId = remember { AtomicLong(0L) }
     var speakingText by remember { mutableStateOf("") }
     var voiceNotice by remember { mutableStateOf<String?>(null) }
+    // Highest durable voice sequence already acted on — makes ReadyToSpeak/Error idempotent so a
+    // recomposition (or re-subscription) reconciling from the StateFlow can never start TTS twice.
+    var lastHandledVoiceSeq by remember { mutableLongStateOf(0L) }
     var hasMicPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -124,6 +129,8 @@ fun VoiceModeScreen(
         stt.setBargeInEnabled(enabled = false)
         liveTranscript = ""
         stt.clearText()
+        // Keep the durable ViewModel phase in sync (TTS done / read-aloud off / resume).
+        chatViewModel.markVoiceListening()
         VoiceDebugLog.log("A", "VoiceModeScreen.resumeListening", "phase->Listening", emptyMap())
     }
 
@@ -288,54 +295,53 @@ fun VoiceModeScreen(
         chatViewModel.loadActiveModel()
     }
 
-    // Single authority for terminal voice outcomes. The ViewModel emits exactly one event per turn
-    // (SpeakResponse / VoiceError / ReturnToListening); the voice UI no longer infers completion from
-    // the message list, so a finished turn can never stay stuck on Thinking.
-    LaunchedEffect(Unit) {
-        chatViewModel.voiceControl.collect { event ->
-            when (event) {
-                is VoiceControl.SpeakResponse -> {
-                    if (!sessionActive || phase != VoiceTalkPhase.Thinking) {
-                        VoiceDebugLog.log(
-                            "A", "VoiceModeScreen.speakResponse", "ignored (not thinking)",
-                            mapOf("turn" to event.turnId, "phase" to phase.name),
-                        )
-                    } else if (!tts.autoReadReplies || !tts.isReady.value) {
-                        // Read-aloud off or TTS unavailable: don't get stuck; the answer is already
-                        // visible in chat — just go back to listening.
-                        VoiceDebugLog.log(
-                            "A", "VoiceModeScreen.speakResponse",
-                            "TTS off/unavailable -> Listening",
-                            mapOf("autoRead" to tts.autoReadReplies, "ready" to tts.isReady.value),
-                        )
-                        resumeListening()
-                    } else {
-                        val first = VoiceSpeakPlanner.nextChunk(event.text, 0, false)
-                        if (first == null) {
-                            resumeListening()
-                        } else {
-                            val sid = speechSeq.incrementAndGet()
-                            activeSpeechId.set(sid)
-                            speakingText = event.text
-                            spokenChars = first.second
-                            phase = VoiceTalkPhase.Speaking
-                            stt.setAcceptingUtterance(false)
-                            VoiceDebugLog.log(
-                                "B", "VoiceModeScreen.speakResponse", "phase->Speaking",
-                                mapOf("turn" to event.turnId, "speechId" to sid, "len" to event.text.length),
-                            )
-                            tts.speak(first.first, sid)
-                        }
-                    }
-                }
-                is VoiceControl.VoiceError -> {
-                    voiceNotice = event.message
-                    if (sessionActive && phase != VoiceTalkPhase.Inactive) resumeListening()
-                }
-                is VoiceControl.ReturnToListening -> {
-                    if (sessionActive && phase != VoiceTalkPhase.Inactive) resumeListening()
+    // Durable reconciliation: the completed reply lives in ChatViewModel's voiceTurn StateFlow, not
+    // in a one-shot event. Keying on (sequence, phase) means a recomposition or screen re-entry
+    // re-reads the latest terminal state, so a finished turn can never stay stuck on Thinking even
+    // if this collector was momentarily gone. VoiceLogic.shouldHandleTerminal makes it fire once.
+    LaunchedEffect(voiceTurn.sequence, voiceTurn.phase) {
+        when (voiceTurn.phase) {
+            VoicePhase.ReadyToSpeak -> {
+                if (!VoiceLogic.shouldHandleTerminal(voiceTurn.sequence, lastHandledVoiceSeq)) return@LaunchedEffect
+                if (!sessionActive) return@LaunchedEffect
+                lastHandledVoiceSeq = voiceTurn.sequence
+                val text = voiceTurn.finalText.orEmpty()
+                val first = VoiceSpeakPlanner.nextChunk(text, 0, false)
+                val action = VoiceLogic.successAction(
+                    autoReadReplies = tts.autoReadReplies,
+                    ttsReady = tts.isReady.value,
+                    hasSpeakableChunk = first != null,
+                )
+                if (action == VoiceLogic.SuccessAction.SPEAK && first != null) {
+                    val sid = speechSeq.incrementAndGet()
+                    activeSpeechId.set(sid)
+                    speakingText = text
+                    spokenChars = first.second
+                    phase = VoiceTalkPhase.Speaking
+                    stt.setAcceptingUtterance(false)
+                    chatViewModel.markVoiceSpeaking()
+                    VoiceDebugLog.log(
+                        "B", "VoiceModeScreen.readyToSpeak", "phase->Speaking",
+                        mapOf("turn" to voiceTurn.turnId, "speechId" to sid, "len" to text.length),
+                    )
+                    tts.speak(first.first, sid)
+                } else {
+                    // Read-aloud off / TTS unavailable / nothing speakable: don't get stuck — the
+                    // answer is already visible in chat, so return straight to listening.
+                    VoiceDebugLog.log(
+                        "A", "VoiceModeScreen.readyToSpeak", "no-speak -> Listening",
+                        mapOf("autoRead" to tts.autoReadReplies, "ready" to tts.isReady.value),
+                    )
+                    resumeListening()
                 }
             }
+            VoicePhase.Error -> {
+                if (!VoiceLogic.shouldHandleTerminal(voiceTurn.sequence, lastHandledVoiceSeq)) return@LaunchedEffect
+                lastHandledVoiceSeq = voiceTurn.sequence
+                voiceNotice = voiceTurn.error
+                if (sessionActive && phase != VoiceTalkPhase.Inactive) resumeListening()
+            }
+            else -> Unit
         }
     }
 
@@ -372,10 +378,10 @@ fun VoiceModeScreen(
         }
     }
 
-    // NOTE: the former message-list LaunchedEffect that started TTS was removed. VoiceControl
-    // (SpeakResponse/VoiceError/ReturnToListening) is now the single authority for a completed
-    // response, so there is exactly one path that enqueues the first chunk. onSpeakComplete only
-    // advances subsequent chunks.
+    // NOTE: the durable voiceTurn StateFlow is the single authority for a completed response, so
+    // there is exactly one path (the reconciliation effect above) that enqueues the first chunk.
+    // onSpeakComplete only advances subsequent chunks. The UI never infers completion from the
+    // message list.
 
     val orbActive = sessionActive && phase != VoiceTalkPhase.Inactive
 

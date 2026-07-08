@@ -143,7 +143,7 @@ $gh = Get-Command gh -ErrorAction SilentlyContinue
 if (-not $gh) {
     Write-Warning "GitHub CLI (gh) not found — skipping cloud upload. Install: winget install GitHub.cli"
 } else {
-    $releaseNotes = "CoffeeAI $version — explicit voice completion events (no more stuck-on-Thinking even with read-aloud off), TTS speech-identity + hard Stop-AI, single TTS-start authority, plus on-device inference performance instrumentation."
+    $releaseNotes = "CoffeeAI $version — bounded per-turn history so conversation latency stays stable as chats grow, plus durable ViewModel-owned voice state (a finished reply can never get stuck on Thinking, survives screen re-entry/recomposition, and an interrupted answer never speaks after Stop AI)."
     $view = & gh release view $tag --repo $githubRepo 2>&1
     if ($LASTEXITCODE -ne 0) {
         & gh release create $tag --repo $githubRepo --title "CoffeeAI $version" --notes $releaseNotes $ApkDest
@@ -170,7 +170,7 @@ $appMeta = @{
     apk_filename   = "personal-edge-ai.apk"
     apk_size_bytes = $size
     download_url   = $downloadUrl
-    notes          = "CoffeeAI v$version - voice completion events, hard Stop-AI, TTS identity, perf metrics"
+    notes          = "CoffeeAI v$version - bounded history for stable latency, durable voice state (no stuck Thinking), hard Stop-AI"
 }
 $appMeta | ConvertTo-Json | Set-Content -Path $appVersionPath -Encoding UTF8
 

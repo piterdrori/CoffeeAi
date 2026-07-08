@@ -23,12 +23,9 @@ import com.personaledge.ai.perf.PerfBackend
 import com.personaledge.ai.perf.PerfCalc
 import com.personaledge.ai.perf.PerfLog
 import com.personaledge.ai.ui.components.OrbState
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
@@ -68,21 +65,39 @@ data class ChatUiState(
     val orbState: OrbState = OrbState.Idle,
 )
 
-/** One-shot signals for the voice UI (it can't observe [UiMessage] removal to know to resume). */
-sealed interface VoiceControl {
-    /** Successful non-blank voice reply — the voice UI should speak [text] (identity-tagged). */
-    data class SpeakResponse(
-        val turnId: Long,
-        val assistantMessageId: String,
-        val text: String,
-    ) : VoiceControl
-
-    /** Nothing usable (blank / timeout / failure) — show a brief notice and return to listening. */
-    data class VoiceError(val message: String) : VoiceControl
-
-    /** Generic resume with no message. */
-    data object ReturnToListening : VoiceControl
+/** Authoritative lifecycle phase for a voice turn, owned by [ChatViewModel]. */
+enum class VoicePhase {
+    /** Voice screen closed / not in a session. */
+    Inactive,
+    /** Microphone open, waiting for the user to speak. */
+    Listening,
+    /** A turn is generating a reply. */
+    Generating,
+    /** A non-blank reply is finalized and ready to be spoken (durable — survives collector gaps). */
+    ReadyToSpeak,
+    /** TTS is actively speaking the reply. */
+    Speaking,
+    /** Nothing usable (blank / timeout / failure) — a visible notice, then back to listening. */
+    Error,
 }
+
+/**
+ * Durable, ViewModel-owned voice state. Unlike a one-shot event, this is a [StateFlow] value that
+ * always holds the latest turn outcome, so a completed reply ([VoicePhase.ReadyToSpeak] with
+ * [finalText]) remains observable even if the UI collector momentarily disappears (recomposition,
+ * screen exit/re-entry). [sequence] increments on each terminal outcome so the UI can start TTS at
+ * most once per turn (idempotent) and reject stale outcomes after Stop AI.
+ */
+data class VoiceTurnState(
+    val sessionId: String? = null,
+    val turnId: Long = 0,
+    val assistantMessageId: String? = null,
+    val phase: VoicePhase = VoicePhase.Inactive,
+    val finalText: String? = null,
+    val error: String? = null,
+    val speechRequested: Boolean = false,
+    val sequence: Long = 0,
+)
 
 class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as EdgeAiApplication
@@ -137,8 +152,49 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val tokenCount: Int,
     )
 
-    private val _voiceControl = MutableSharedFlow<VoiceControl>(extraBufferCapacity = 8)
-    val voiceControl: SharedFlow<VoiceControl> = _voiceControl.asSharedFlow()
+    // Durable voice state (see [VoiceTurnState]). Replaces the previous one-shot SharedFlow so a
+    // finished reply is never lost when no collector happens to be subscribed at the emit moment.
+    private val _voiceTurn = MutableStateFlow(VoiceTurnState())
+    val voiceTurn: StateFlow<VoiceTurnState> = _voiceTurn.asStateFlow()
+    private val voiceSeq = AtomicLong(0L)
+
+    private fun setVoiceReadyToSpeak(turnId: Long, assistantId: String, text: String) {
+        _voiceTurn.value = VoiceTurnState(
+            sessionId = currentSessionId,
+            turnId = turnId,
+            assistantMessageId = assistantId,
+            phase = VoicePhase.ReadyToSpeak,
+            finalText = text,
+            error = null,
+            speechRequested = false,
+            sequence = voiceSeq.incrementAndGet(),
+        )
+    }
+
+    private fun setVoiceError(message: String) {
+        _voiceTurn.update {
+            it.copy(
+                phase = VoicePhase.Error,
+                finalText = null,
+                error = message,
+                speechRequested = false,
+                sequence = voiceSeq.incrementAndGet(),
+            )
+        }
+    }
+
+    /** Called by the voice UI when it begins actually speaking the ready reply. */
+    fun markVoiceSpeaking() {
+        _voiceTurn.update { if (it.phase == VoicePhase.Inactive) it else it.copy(phase = VoicePhase.Speaking, speechRequested = true) }
+    }
+
+    /** Called by the voice UI when it returns the mic to listening (TTS done / read-aloud off). */
+    fun markVoiceListening() {
+        _voiceTurn.update {
+            if (it.phase == VoicePhase.Inactive) it
+            else it.copy(phase = VoicePhase.Listening, finalText = null, error = null, speechRequested = false)
+        }
+    }
 
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
@@ -298,11 +354,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             updateAssistantMessage(assistantId) { it.copy(content = clean, isStreaming = false) }
             setIdleState()
             invalidateTurns()
-            // Voice success: emit an explicit, identity-tagged terminal event. The voice UI no
-            // longer infers success from the message list, so it can never stay stuck on Thinking.
+            // Voice success: publish a DURABLE ready-to-speak state (not a one-shot event). The
+            // voice UI reconciles from this StateFlow, so a finished turn can never stay stuck on
+            // Thinking even if the collector was momentarily gone.
             if (isVoice) {
-                Log.i(TAG, "turn=$turnId voiceEvent=SpeakResponse msg=$assistantId len=${clean.length}")
-                _voiceControl.tryEmit(VoiceControl.SpeakResponse(turnId, assistantId, clean))
+                Log.i(TAG, "turn=$turnId voicePhase=ReadyToSpeak msg=$assistantId len=${clean.length}")
+                setVoiceReadyToSpeak(turnId, assistantId, clean)
             }
             viewModelScope.launch { syncClient.syncTurn(prompt, clean) }
         } else {
@@ -311,8 +368,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             setIdleState()
             invalidateTurns()
             if (isVoice) {
-                Log.i(TAG, "turn=$turnId voiceEvent=VoiceError(blank) timeout=${result.timeout}")
-                _voiceControl.tryEmit(VoiceControl.VoiceError("I didn't catch a reply. Please try again."))
+                Log.i(TAG, "turn=$turnId voicePhase=Error(blank) timeout=${result.timeout}")
+                setVoiceError("I didn't catch a reply. Please try again.")
             } else {
                 _uiState.update { it.copy(error = timeoutError(result.timeout)) }
             }
@@ -330,7 +387,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(isLoading = false, orbState = OrbState.Idle, error = e.message ?: "Generation failed")
         }
         Log.w(TAG, "turn=$turnId failed msg=$assistantId: ${e.message}")
-        if (isVoice) _voiceControl.tryEmit(VoiceControl.VoiceError("Something went wrong. Please try again."))
+        if (isVoice) setVoiceError("Something went wrong. Please try again.")
     }
 
     fun loadSession(sessionId: String) {
@@ -376,7 +433,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (engine.isLoaded) {
             val memory = syncClient.offlineContext()
-            engine.startConversation(memory, ChatLogic.sanitizeHistory(messages))
+            engine.startConversation(memory, ChatLogic.selectHistory(messages).turns)
         }
     }
 
@@ -641,10 +698,17 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         sendJob = null
         resetGenerationUiState(cancelNative = true, clearError = true)
         job?.cancel()
+        // Stop AI / barge-in during a voice session: clear any durable ReadyToSpeak so an
+        // interrupted answer can never begin speaking after the user stopped it.
+        _voiceTurn.update {
+            if (it.phase == VoicePhase.Inactive) it
+            else it.copy(phase = VoicePhase.Listening, finalText = null, error = null, speechRequested = false)
+        }
     }
 
     fun beginVoiceSession() {
         // Ensure the model is loaded; the conversation is (re)built fresh for each turn.
+        _voiceTurn.update { it.copy(phase = VoicePhase.Listening, finalText = null, error = null, speechRequested = false) }
         viewModelScope.launch {
             if (!_uiState.value.isEngineReady) {
                 loadActiveModelInternal()
@@ -657,6 +721,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         activeRecorder?.markCancellationRequested()
         invalidateTurns()
         engine.cancelGeneration()
+        _voiceTurn.value = VoiceTurnState()
     }
 
     fun sendVoiceMessage() {
@@ -699,15 +764,18 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 pendingImageUri = null,
                             )
                         }
-                        if (isVoice) _voiceControl.tryEmit(VoiceControl.VoiceError(err))
+                        if (isVoice) setVoiceError(err)
                         return@launch
                     }
                 }
 
-                // History = everything BEFORE this turn's user message (sanitized). The new prompt
-                // is sent separately, so it appears exactly once.
+                // History = everything BEFORE this turn's user message. Bounded by the history
+                // budget so the per-turn re-prefill (and first-token latency) stays stable as the
+                // visible transcript grows. The new prompt is sent separately (appears exactly
+                // once). Offline: no rolling summary / backend memory (recent-window only).
                 val priorMessages = _uiState.value.messages
-                val history = ChatLogic.sanitizeHistory(priorMessages)
+                val selectedHistory = ChatLogic.selectHistory(priorMessages)
+                val history = selectedHistory.turns
 
                 val modelEntry = _uiState.value.activeModelId?.let { ModelCatalog.findById(it) }
                     ?: ModelCatalog.defaultModel()
@@ -760,10 +828,39 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
 
+                if (isVoice) {
+                    _voiceTurn.update {
+                        it.copy(
+                            sessionId = currentSessionId,
+                            turnId = turnId,
+                            assistantMessageId = assistantId,
+                            phase = VoicePhase.Generating,
+                            finalText = null,
+                            error = null,
+                            speechRequested = false,
+                        )
+                    }
+                }
+
                 Log.i(
                     TAG,
-                    "turn=$turnId start msg=$assistantId voice=$isVoice historyCount=${history.size} " +
-                        "promptLen=${prompt.length} promptHash=${prompt.hashCode()} model=${_uiState.value.activeModelId}",
+                    "turn=$turnId start msg=$assistantId voice=$isVoice model=${_uiState.value.activeModelId} " +
+                        "promptLen=${prompt.length} promptHash=${prompt.hashCode()}",
+                )
+                // History/prefill diagnostics — counts and lengths only, never raw text. Combined
+                // with the perf-recorder turn metrics (conv-create, first-token, decode) this lets
+                // latency-vs-context growth be measured turn over turn.
+                val promptTokens = PerfCalc.estimateTokens(prompt.length)
+                val systemTokens = PerfCalc.estimateTokens(engine.lastSystemInstructionLength)
+                Log.i(
+                    TAG,
+                    "turn=$turnId history stored=${selectedHistory.totalStoredMessages} " +
+                        "valid=${selectedHistory.validMessages} selected=${selectedHistory.selectedCount} " +
+                        "dropped=${selectedHistory.droppedCount} trimmed=${selectedHistory.trimmedMessageCount} " +
+                        "histChars=${selectedHistory.selectedChars} histTok=${selectedHistory.historyTokens} " +
+                        "summaryChars=${selectedHistory.summaryChars} summaryTok=${selectedHistory.summaryTokens} " +
+                        "memChars=${selectedHistory.memoryChars} memTok=${selectedHistory.memoryTokens} " +
+                        "promptTok=$promptTokens estInputTok=${systemTokens + selectedHistory.historyTokens + selectedHistory.summaryTokens + selectedHistory.memoryTokens + promptTokens}",
                 )
 
                 val result = runGeneration(
@@ -779,7 +876,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     },
                     includeOrb = true,
                     recorder = rec,
-                    promptCharsBase = prompt.length + history.sumOf { it.content.length },
+                    promptCharsBase = prompt.length + selectedHistory.selectedChars,
                 )
                 val status = when {
                     result.timeout == GenTimeout.FIRST_TOKEN -> CompletionStatus.TIMEOUT_FIRST_TOKEN
@@ -842,7 +939,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 _brewState.value = BrewState(BrewStatus.Brewing, displayName)
                 val priorMessages = _uiState.value.messages
-                val history = ChatLogic.sanitizeHistory(priorMessages)
+                val history = ChatLogic.selectHistory(priorMessages).turns
                 val memory = syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
 
                 _uiState.update {

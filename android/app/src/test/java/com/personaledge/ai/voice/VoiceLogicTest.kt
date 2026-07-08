@@ -54,4 +54,16 @@ class VoiceLogicTest {
     fun currentCallback_isNotStale() {
         assertFalse(VoiceLogic.isStaleSpeechCallback(callbackSpeechId = 6L, activeSpeechId = 6L))
     }
+
+    // Test 21 — the same ReadyToSpeak sequence cannot start TTS twice (idempotent reconciliation).
+    @Test
+    fun shouldHandleTerminal_onlyNewerSequences() {
+        assertTrue(VoiceLogic.shouldHandleTerminal(sequence = 1L, lastHandledSequence = 0L))
+        // Re-reading the same completed state (recomposition / re-subscription) must NOT re-fire.
+        assertFalse(VoiceLogic.shouldHandleTerminal(sequence = 1L, lastHandledSequence = 1L))
+        // A stale/older sequence is also ignored.
+        assertFalse(VoiceLogic.shouldHandleTerminal(sequence = 1L, lastHandledSequence = 2L))
+        // The next turn's outcome is handled.
+        assertTrue(VoiceLogic.shouldHandleTerminal(sequence = 3L, lastHandledSequence = 2L))
+    }
 }

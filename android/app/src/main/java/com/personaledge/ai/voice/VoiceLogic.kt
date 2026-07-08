@@ -28,4 +28,13 @@ object VoiceLogic {
      */
     fun isStaleSpeechCallback(callbackSpeechId: Long, activeSpeechId: Long): Boolean =
         callbackSpeechId == 0L || callbackSpeechId != activeSpeechId
+
+    /**
+     * A durable terminal voice outcome (ReadyToSpeak / Error) should be acted on only when its
+     * [sequence] is newer than the last one already handled. This makes reconciliation from the
+     * StateFlow idempotent: a recomposition or re-subscription that re-reads the same completed
+     * state cannot start TTS (or re-show a notice) twice for the same turn.
+     */
+    fun shouldHandleTerminal(sequence: Long, lastHandledSequence: Long): Boolean =
+        sequence > lastHandledSequence
 }
