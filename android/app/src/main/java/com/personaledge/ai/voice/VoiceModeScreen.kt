@@ -65,6 +65,7 @@ import com.personaledge.ai.ui.theme.CoffeeText
 import com.personaledge.ai.ui.theme.Error
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 private enum class VoiceTalkPhase {
     Inactive,
@@ -100,6 +101,11 @@ fun VoiceModeScreen(
     var phase by remember { mutableStateOf(VoiceTalkPhase.Inactive) }
     var spokenChars by remember { mutableIntStateOf(0) }
     var liveTranscript by remember { mutableStateOf("") }
+    // TTS speech identity: only the currently-active spoken response may advance chunks or resume.
+    val speechSeq = remember { AtomicLong(0L) }
+    val activeSpeechId = remember { AtomicLong(0L) }
+    var speakingText by remember { mutableStateOf("") }
+    var voiceNotice by remember { mutableStateOf<String?>(null) }
     var hasMicPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
@@ -110,12 +116,15 @@ fun VoiceModeScreen(
         (SherpaVoiceConfig.isPhysicalDevice || micConnected || SherpaVoiceConfig.useOnlineStt)
 
     fun resumeListening() {
+        activeSpeechId.set(0L) // invalidate any in-flight speech so its late callbacks are ignored
+        speakingText = ""
         phase = VoiceTalkPhase.Listening
         spokenChars = 0
         stt.setAcceptingUtterance(true)
         stt.setBargeInEnabled(enabled = false)
         liveTranscript = ""
         stt.clearText()
+        VoiceDebugLog.log("A", "VoiceModeScreen.resumeListening", "phase->Listening", emptyMap())
     }
 
     SideEffect {
@@ -126,6 +135,7 @@ fun VoiceModeScreen(
     }
 
     fun stopVoiceSession() {
+        activeSpeechId.set(0L)
         tts.stop()
         chatViewModel.cancelResponse()
         chatViewModel.endVoiceSession()
@@ -133,6 +143,7 @@ fun VoiceModeScreen(
         stt.stopSession()
         phase = VoiceTalkPhase.Inactive
         spokenChars = 0
+        speakingText = ""
         liveTranscript = ""
         stt.clearText()
         stt.startMicMonitor()
@@ -151,9 +162,14 @@ fun VoiceModeScreen(
             ),
         )
         // #endregion
+        // Hard stop, in order: 1) invalidate speech id so late TTS callbacks are rejected,
+        // 2) stop + clear TTS queue, 3) invalidate turn + native cancel + cancel job (cancelResponse),
+        // 4) clear local speaking state, 5) return to listening (also restarts STT accepting).
+        activeSpeechId.set(0L)
         tts.stop()
         chatViewModel.cancelResponse()
         spokenChars = 0
+        speakingText = ""
         stt.setTtsPlaybackActive(false)
         if (sessionActive) {
             resumeListening()
@@ -175,6 +191,7 @@ fun VoiceModeScreen(
             scope.launch(Dispatchers.Main) {
                 if (phase != VoiceTalkPhase.Listening) return@launch
                 liveTranscript = text
+                voiceNotice = null
                 spokenChars = 0
                 phase = VoiceTalkPhase.Thinking
                 stt.setAcceptingUtterance(false)
@@ -228,18 +245,22 @@ fun VoiceModeScreen(
     }
 
     DisposableEffect(Unit) {
-        tts.onSpeakComplete = {
+        tts.onSpeakComplete = { completedSpeechId ->
             scope.launch(Dispatchers.Main) {
-                if (!sessionActive || phase != VoiceTalkPhase.Speaking) return@launch
-                val last = chatState.messages.lastOrNull()
-                val stillStreaming = chatState.isLoading || last?.isStreaming == true
-                val more = last?.content?.let { content ->
-                    VoiceSpeakPlanner.nextChunk(content, spokenChars, stillStreaming)
+                // Reject callbacks from a stopped/superseded speech (0 = invalidated).
+                if (completedSpeechId == 0L || completedSpeechId != activeSpeechId.get()) {
+                    VoiceDebugLog.log(
+                        "C", "VoiceModeScreen.onSpeakComplete", "stale TTS callback rejected",
+                        mapOf("cb" to completedSpeechId, "active" to activeSpeechId.get()),
+                    )
+                    return@launch
                 }
+                if (!sessionActive || phase != VoiceTalkPhase.Speaking) return@launch
+                val more = VoiceSpeakPlanner.nextChunk(speakingText, spokenChars, false)
                 if (more != null) {
                     spokenChars = more.second
-                    tts.speak(more.first)
-                } else if (!stillStreaming) {
+                    tts.speak(more.first, completedSpeechId)
+                } else {
                     resumeListening()
                 }
             }
@@ -267,15 +288,52 @@ fun VoiceModeScreen(
         chatViewModel.loadActiveModel()
     }
 
-    // The ViewModel removes blank assistant placeholders, so the voice screen can't detect
-    // "nothing to say" from the message list. It signals us to resume listening instead.
+    // Single authority for terminal voice outcomes. The ViewModel emits exactly one event per turn
+    // (SpeakResponse / VoiceError / ReturnToListening); the voice UI no longer infers completion from
+    // the message list, so a finished turn can never stay stuck on Thinking.
     LaunchedEffect(Unit) {
         chatViewModel.voiceControl.collect { event ->
             when (event) {
-                is VoiceControl.ReturnToListening -> {
-                    if (sessionActive && phase != VoiceTalkPhase.Inactive) {
+                is VoiceControl.SpeakResponse -> {
+                    if (!sessionActive || phase != VoiceTalkPhase.Thinking) {
+                        VoiceDebugLog.log(
+                            "A", "VoiceModeScreen.speakResponse", "ignored (not thinking)",
+                            mapOf("turn" to event.turnId, "phase" to phase.name),
+                        )
+                    } else if (!tts.autoReadReplies || !tts.isReady.value) {
+                        // Read-aloud off or TTS unavailable: don't get stuck; the answer is already
+                        // visible in chat — just go back to listening.
+                        VoiceDebugLog.log(
+                            "A", "VoiceModeScreen.speakResponse",
+                            "TTS off/unavailable -> Listening",
+                            mapOf("autoRead" to tts.autoReadReplies, "ready" to tts.isReady.value),
+                        )
                         resumeListening()
+                    } else {
+                        val first = VoiceSpeakPlanner.nextChunk(event.text, 0, false)
+                        if (first == null) {
+                            resumeListening()
+                        } else {
+                            val sid = speechSeq.incrementAndGet()
+                            activeSpeechId.set(sid)
+                            speakingText = event.text
+                            spokenChars = first.second
+                            phase = VoiceTalkPhase.Speaking
+                            stt.setAcceptingUtterance(false)
+                            VoiceDebugLog.log(
+                                "B", "VoiceModeScreen.speakResponse", "phase->Speaking",
+                                mapOf("turn" to event.turnId, "speechId" to sid, "len" to event.text.length),
+                            )
+                            tts.speak(first.first, sid)
+                        }
                     }
+                }
+                is VoiceControl.VoiceError -> {
+                    voiceNotice = event.message
+                    if (sessionActive && phase != VoiceTalkPhase.Inactive) resumeListening()
+                }
+                is VoiceControl.ReturnToListening -> {
+                    if (sessionActive && phase != VoiceTalkPhase.Inactive) resumeListening()
                 }
             }
         }
@@ -298,42 +356,26 @@ fun VoiceModeScreen(
         // #endregion
         stt.setTtsPlaybackActive(isSpeaking)
         // Mic is ON only while Listening. During Thinking and Speaking the mic stays OFF so the
-        // AI can never interrupt itself; the user interrupts with the Stop AI button, and the
-        // mic turns back on automatically once the AI finishes (or when Stop AI is tapped).
+        // AI can never interrupt itself on a loudspeaker (echo/self-trigger). The user interrupts
+        // with the Stop AI button; the mic turns back on when the turn ends or Stop AI is tapped.
+        // NOTE: this is why speak-to-interrupt does not work yet (see audit) — a future change may
+        // re-enable it only when a headset is connected (duplex-safe).
         when (phase) {
-            VoiceTalkPhase.Thinking, VoiceTalkPhase.Speaking ->
+            VoiceTalkPhase.Thinking, VoiceTalkPhase.Speaking -> {
                 stt.setBargeInEnabled(enabled = false)
+                VoiceDebugLog.log(
+                    "D", "VoiceModeScreen.phaseEffect", "barge-in disabled (loudspeaker echo guard)",
+                    mapOf("phase" to phase.name),
+                )
+            }
             else -> Unit
         }
     }
 
-    LaunchedEffect(chatState.messages, chatState.isLoading, chatState.error, sessionActive, phase) {
-        if (!sessionActive) return@LaunchedEffect
-
-        if (chatState.error != null && (phase == VoiceTalkPhase.Thinking || phase == VoiceTalkPhase.Speaking)) {
-            resumeListening()
-            return@LaunchedEffect
-        }
-
-        val last = chatState.messages.lastOrNull() ?: return@LaunchedEffect
-        if (last.role != "assistant" || !tts.autoReadReplies) return@LaunchedEffect
-        if (phase != VoiceTalkPhase.Thinking && phase != VoiceTalkPhase.Speaking) return@LaunchedEffect
-
-        val stillStreaming = chatState.isLoading || last.isStreaming
-        val planned = VoiceSpeakPlanner.nextChunk(last.content, spokenChars, stillStreaming) ?: run {
-            if (!stillStreaming && phase == VoiceTalkPhase.Thinking && last.content.isBlank()) {
-                resumeListening()
-            }
-            return@LaunchedEffect
-        }
-
-        if (phase == VoiceTalkPhase.Thinking) {
-            phase = VoiceTalkPhase.Speaking
-            stt.setAcceptingUtterance(false)
-        }
-        spokenChars = planned.second
-        tts.speak(planned.first)
-    }
+    // NOTE: the former message-list LaunchedEffect that started TTS was removed. VoiceControl
+    // (SpeakResponse/VoiceError/ReturnToListening) is now the single authority for a completed
+    // response, so there is exactly one path that enqueues the first chunk. onSpeakComplete only
+    // advances subsequent chunks.
 
     val orbActive = sessionActive && phase != VoiceTalkPhase.Inactive
 
@@ -490,6 +532,16 @@ fun VoiceModeScreen(
                 Text(
                     text = it,
                     color = Error,
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 12.dp),
+                )
+            }
+
+            voiceNotice?.let { notice ->
+                Text(
+                    text = notice,
+                    color = CoffeeText.copy(alpha = 0.6f),
                     fontSize = 13.sp,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.padding(top = 12.dp),

@@ -9,12 +9,19 @@ import com.personaledge.ai.EdgeAiApplication
 import com.personaledge.ai.coffee.BrewState
 import com.personaledge.ai.coffee.BrewStatus
 import com.personaledge.ai.coffee.MachineCommand
+import android.os.SystemClock
 import com.personaledge.ai.inference.ChatTurn
 import com.personaledge.ai.inference.InferenceBackend
 import com.personaledge.ai.inference.MemoryContext
 import com.personaledge.ai.inference.LiteRTEngine
 import com.personaledge.ai.models.ModelCatalog
 import com.personaledge.ai.models.ModelEntry
+import com.personaledge.ai.perf.CompletionStatus
+import com.personaledge.ai.perf.ErrorCategory
+import com.personaledge.ai.perf.InferenceMetricsRecorder
+import com.personaledge.ai.perf.PerfBackend
+import com.personaledge.ai.perf.PerfCalc
+import com.personaledge.ai.perf.PerfLog
 import com.personaledge.ai.ui.components.OrbState
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -63,6 +70,17 @@ data class ChatUiState(
 
 /** One-shot signals for the voice UI (it can't observe [UiMessage] removal to know to resume). */
 sealed interface VoiceControl {
+    /** Successful non-blank voice reply — the voice UI should speak [text] (identity-tagged). */
+    data class SpeakResponse(
+        val turnId: Long,
+        val assistantMessageId: String,
+        val text: String,
+    ) : VoiceControl
+
+    /** Nothing usable (blank / timeout / failure) — show a brief notice and return to listening. */
+    data class VoiceError(val message: String) : VoiceControl
+
+    /** Generic resume with no message. */
     data object ReturnToListening : VoiceControl
 }
 
@@ -76,6 +94,11 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     private var currentSessionId: String? = null
     private var sendJob: Job? = null
     private var machineCommandJob: Job? = null
+
+    // Stage 0 instrumentation: the in-flight turn's recorder (so external cancel can stamp latency)
+    // and the most recent model-preparation duration. Measurement only — no behavior change.
+    @Volatile private var activeRecorder: InferenceMetricsRecorder? = null
+    @Volatile private var lastModelPrepMs: Long = 0
 
     private companion object {
         const val TAG = "CoffeeGen"
@@ -182,6 +205,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         startConversation: suspend () -> Unit,
         makeFlow: () -> Flow<String>,
         includeOrb: Boolean,
+        recorder: InferenceMetricsRecorder? = null,
+        promptCharsBase: Int = 0,
     ): GenResult = generationMutex.withLock {
         val builder = StringBuilder()
         var lastUiMs = 0L
@@ -194,7 +219,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         coroutineScope {
             val generation = launch {
                 startConversation()
+                // Conversation/prompt/backend timings are produced by LiteRTEngine during
+                // startConversation(); read them here (measurement only).
+                recorder?.setConversationCreation(engine.lastConversationCreationMs)
+                recorder?.setPromptBuild(engine.lastPromptBuildMs, engine.lastSystemInstructionLength + promptCharsBase)
+                engine.lastBackendSelection?.let { recorder?.setBackendSelection(it) }
+                recorder?.markGenerationStart()
                 makeFlow().collect { token ->
+                    recorder?.onStreamEvent(token)
                     if (!isActiveTurn(turnId)) return@collect
                     if (firstTokenAtMs == 0L && token.isNotEmpty()) {
                         firstTokenAtMs = System.currentTimeMillis()
@@ -222,12 +254,14 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     if (firstTokenAtMs == 0L) {
                         if (now - startMs > FIRST_TOKEN_TIMEOUT_MS) {
                             timeout = GenTimeout.FIRST_TOKEN
+                            recorder?.markCancellationRequested()
                             engine.cancelGeneration()
                             generation.cancel()
                             break
                         }
                     } else if (now - lastTokenMs > INTER_TOKEN_TIMEOUT_MS) {
                         timeout = GenTimeout.INTER_TOKEN
+                        recorder?.markCancellationRequested()
                         engine.cancelGeneration()
                         generation.cancel()
                         break
@@ -264,6 +298,12 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             updateAssistantMessage(assistantId) { it.copy(content = clean, isStreaming = false) }
             setIdleState()
             invalidateTurns()
+            // Voice success: emit an explicit, identity-tagged terminal event. The voice UI no
+            // longer infers success from the message list, so it can never stay stuck on Thinking.
+            if (isVoice) {
+                Log.i(TAG, "turn=$turnId voiceEvent=SpeakResponse msg=$assistantId len=${clean.length}")
+                _voiceControl.tryEmit(VoiceControl.SpeakResponse(turnId, assistantId, clean))
+            }
             viewModelScope.launch { syncClient.syncTurn(prompt, clean) }
         } else {
             // Blank reply: never persist, never feed to history, never speak a canned line.
@@ -271,7 +311,8 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             setIdleState()
             invalidateTurns()
             if (isVoice) {
-                _voiceControl.tryEmit(VoiceControl.ReturnToListening)
+                Log.i(TAG, "turn=$turnId voiceEvent=VoiceError(blank) timeout=${result.timeout}")
+                _voiceControl.tryEmit(VoiceControl.VoiceError("I didn't catch a reply. Please try again."))
             } else {
                 _uiState.update { it.copy(error = timeoutError(result.timeout)) }
             }
@@ -289,7 +330,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(isLoading = false, orbState = OrbState.Idle, error = e.message ?: "Generation failed")
         }
         Log.w(TAG, "turn=$turnId failed msg=$assistantId: ${e.message}")
-        if (isVoice) _voiceControl.tryEmit(VoiceControl.ReturnToListening)
+        if (isVoice) _voiceControl.tryEmit(VoiceControl.VoiceError("Something went wrong. Please try again."))
     }
 
     fun loadSession(sessionId: String) {
@@ -407,7 +448,10 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                     activeModelId = primary.id,
                 )
             }
-            if (!modelRepository.ensureOnDisk(primary)) {
+            val prepStart = SystemClock.elapsedRealtimeNanos()
+            val prepared = modelRepository.ensureOnDisk(primary)
+            lastModelPrepMs = PerfCalc.nanosToMs(SystemClock.elapsedRealtimeNanos() - prepStart)
+            if (!prepared) {
                 _uiState.update {
                     it.copy(
                         isEngineReady = false,
@@ -477,15 +521,33 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun tryLoadEntry(entry: ModelEntry, preferGpu: Boolean): Result<MemoryContext?> {
+        val loadRecorder = PerfLog.newModelLoadRecorder(
+            context = app,
+            modelId = entry.id,
+            modelFileName = entry.fileName,
+            modelFileSizeBytes = entry.sizeBytes,
+            requestedBackend = if (preferGpu) PerfBackend.GPU else PerfBackend.CPU,
+        )
+        loadRecorder.modelPreparationMs = lastModelPrepMs
+        loadRecorder.captureMemory("beforeModelLoad")
+        loadRecorder.captureThermal("beforeModelLoad")
         return try {
             val backend = engine.loadModelWithFallback(entry, modelRepository.getModelFile(entry), preferGpu = preferGpu)
+            loadRecorder.engineCreationMs = engine.lastEngineCreationMs
+            loadRecorder.engineInitializationMs = engine.lastEngineInitializationMs
+            engine.lastBackendSelection?.let { loadRecorder.setBackendSelection(it) }
+            loadRecorder.captureMemory("afterModelLoad")
+            loadRecorder.captureThermal("afterModelLoad")
             if (preferGpu && backend == InferenceBackend.CPU) {
                 syncClient.disableGpu()
             }
             val memory = syncClient.offlineContext()
             engine.startConversation(memory)
+            loadRecorder.conversationCreationMs = engine.lastConversationCreationMs
+            loadRecorder.finish(CompletionStatus.SUCCESS)
             Result.success(memory)
         } catch (e: Exception) {
+            loadRecorder.finish(CompletionStatus.ERROR, ErrorCategory.LOAD_FAILURE)
             Result.failure(e)
         }
     }
@@ -574,6 +636,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun cancelResponse() {
         Log.i(TAG, "cancelResponse (active=${activeTurnId.get()})")
+        activeRecorder?.markCancellationRequested()
         val job = sendJob
         sendJob = null
         resetGenerationUiState(cancelNative = true, clearError = true)
@@ -591,6 +654,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
 
     fun endVoiceSession() {
         // Voice screen closing — make sure no turn keeps running or writes back.
+        activeRecorder?.markCancellationRequested()
         invalidateTurns()
         engine.cancelGeneration()
     }
@@ -616,6 +680,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
         val assistantId = UUID.randomUUID().toString()
         val pendingImageUri = _uiState.value.pendingImageUri
         sendJob = viewModelScope.launch {
+            var recorder: InferenceMetricsRecorder? = null
             try {
                 ensureSessionInStore()
                 if (!_uiState.value.isEngineReady) {
@@ -634,7 +699,7 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                                 pendingImageUri = null,
                             )
                         }
-                        if (isVoice) _voiceControl.tryEmit(VoiceControl.ReturnToListening)
+                        if (isVoice) _voiceControl.tryEmit(VoiceControl.VoiceError(err))
                         return@launch
                     }
                 }
@@ -643,10 +708,41 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                 // is sent separately, so it appears exactly once.
                 val priorMessages = _uiState.value.messages
                 val history = ChatLogic.sanitizeHistory(priorMessages)
+
+                val modelEntry = _uiState.value.activeModelId?.let { ModelCatalog.findById(it) }
+                    ?: ModelCatalog.defaultModel()
+                val rec = PerfLog.newTurnRecorder(
+                    context = app,
+                    localTurnId = turnId,
+                    sessionId = currentSessionId,
+                    modelId = modelEntry.id,
+                    modelFileName = modelEntry.fileName,
+                    modelFileSizeBytes = modelEntry.sizeBytes,
+                )
+                recorder = rec
+                activeRecorder = rec
+
+                // Behavior-identical prefetch: voice uses offline context; text uses the measured
+                // quick prefetch and falls back to offline context on null — same as before.
                 val memory = if (isVoice) {
-                    syncClient.offlineContext()
+                    val offStart = SystemClock.elapsedRealtimeNanos()
+                    val m = syncClient.offlineContext()
+                    rec.setOfflineFallback(PerfCalc.nanosToMs(SystemClock.elapsedRealtimeNanos() - offStart))
+                    m
                 } else {
-                    syncClient.prefetchQuick(prompt) ?: syncClient.offlineContext()
+                    val res = syncClient.prefetchQuickMeasured(prompt)
+                    rec.setPrefetch(
+                        res.telemetry.outcome,
+                        res.telemetry.latencyMs,
+                        res.telemetry.chunkCount,
+                        res.telemetry.contextCharacterCount,
+                    )
+                    res.context ?: run {
+                        val offStart = SystemClock.elapsedRealtimeNanos()
+                        val m = syncClient.offlineContext()
+                        rec.setOfflineFallback(PerfCalc.nanosToMs(SystemClock.elapsedRealtimeNanos() - offStart))
+                        m
+                    }
                 }
 
                 _uiState.update {
@@ -682,11 +778,29 @@ class ChatViewModel(application: Application) : AndroidViewModel(application) {
                         else engine.sendMessageStreaming(prompt)
                     },
                     includeOrb = true,
+                    recorder = rec,
+                    promptCharsBase = prompt.length + history.sumOf { it.content.length },
                 )
+                val status = when {
+                    result.timeout == GenTimeout.FIRST_TOKEN -> CompletionStatus.TIMEOUT_FIRST_TOKEN
+                    result.timeout == GenTimeout.INTER_TOKEN -> CompletionStatus.TIMEOUT_INTER_TOKEN
+                    cleanReply(result.text).isBlank() -> CompletionStatus.BLANK
+                    else -> CompletionStatus.SUCCESS
+                }
+                val errorCategory = when (status) {
+                    CompletionStatus.TIMEOUT_FIRST_TOKEN, CompletionStatus.TIMEOUT_INTER_TOKEN -> ErrorCategory.TIMEOUT
+                    else -> ErrorCategory.NONE
+                }
+                rec.finish(status, errorCategory)
+                activeRecorder = null
                 finishTurn(turnId, assistantId, prompt, result, isVoice)
             } catch (_: CancellationException) {
                 // Cancelled by cancelResponse()/supersession — UI already handled there.
+                recorder?.finish(CompletionStatus.CANCELLED, ErrorCategory.CANCELLED)
+                activeRecorder = null
             } catch (e: Exception) {
+                recorder?.finish(CompletionStatus.ERROR, ErrorCategory.GENERATION_FAILURE)
+                activeRecorder = null
                 failTurn(turnId, assistantId, e, isVoice)
             }
         }

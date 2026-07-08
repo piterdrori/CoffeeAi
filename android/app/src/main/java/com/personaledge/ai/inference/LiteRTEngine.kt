@@ -10,7 +10,11 @@ import com.google.ai.edge.litertlm.Engine
 import com.google.ai.edge.litertlm.EngineConfig
 import com.google.ai.edge.litertlm.Message
 import com.google.ai.edge.litertlm.SamplerConfig
+import android.os.SystemClock
 import com.personaledge.ai.models.ModelEntry
+import com.personaledge.ai.perf.BackendSelection
+import com.personaledge.ai.perf.PerfBackend
+import com.personaledge.ai.perf.PerfCalc
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -21,6 +25,11 @@ enum class InferenceBackend {
     GPU,
 }
 
+private fun InferenceBackend.toPerf(): PerfBackend = when (this) {
+    InferenceBackend.CPU -> PerfBackend.CPU
+    InferenceBackend.GPU -> PerfBackend.GPU
+}
+
 class LiteRTEngine(
     private val context: Context,
 ) {
@@ -29,6 +38,21 @@ class LiteRTEngine(
     private var loadedModelId: String? = null
 
     val isLoaded: Boolean get() = engine != null
+
+    // ---- Stage 0 instrumentation (measurement only; does not affect inference behavior) ----
+    // Last-observed monotonic durations, read by the caller after each operation. -1 = not measured.
+    @Volatile var lastEngineCreationMs: Long = -1
+        private set
+    @Volatile var lastEngineInitializationMs: Long = -1
+        private set
+    @Volatile var lastPromptBuildMs: Long = -1
+        private set
+    @Volatile var lastConversationCreationMs: Long = -1
+        private set
+    @Volatile var lastSystemInstructionLength: Int = 0
+        private set
+    @Volatile var lastBackendSelection: BackendSelection? = null
+        private set
 
     suspend fun loadModel(
         entry: ModelEntry,
@@ -63,10 +87,21 @@ class LiteRTEngine(
             visionBackend = visionBackend,
             audioBackend = if (entry.supportsAudio) Backend.CPU() else null,
         )
+        val createStart = SystemClock.elapsedRealtimeNanos()
         val newEngine = Engine(config)
+        lastEngineCreationMs = PerfCalc.nanosToMs(SystemClock.elapsedRealtimeNanos() - createStart)
+        val initStart = SystemClock.elapsedRealtimeNanos()
         newEngine.initialize()
+        lastEngineInitializationMs = PerfCalc.nanosToMs(SystemClock.elapsedRealtimeNanos() - initStart)
         engine = newEngine
         loadedModelId = entry.id
+        // Direct load has no fallback; requested == attempted == selected.
+        lastBackendSelection = BackendSelection(
+            requested = backend.toPerf(),
+            attempted = backend.toPerf(),
+            selected = backend.toPerf(),
+            fallbackOccurred = false,
+        )
     }
 
     suspend fun loadModelWithFallback(
@@ -77,11 +112,25 @@ class LiteRTEngine(
         if (preferGpu) {
             try {
                 loadModel(entry, modelFile, InferenceBackend.GPU)
+                lastBackendSelection = BackendSelection(
+                    requested = PerfBackend.GPU,
+                    attempted = PerfBackend.GPU,
+                    selected = PerfBackend.GPU,
+                    fallbackOccurred = false,
+                )
                 return InferenceBackend.GPU
             } catch (_: Exception) {
+                // Behavior unchanged: fall through to CPU. We only record that a fallback happened.
             }
         }
         loadModel(entry, modelFile, InferenceBackend.CPU, useGpuForVision = false)
+        lastBackendSelection = BackendSelection(
+            requested = if (preferGpu) PerfBackend.GPU else PerfBackend.CPU,
+            attempted = if (preferGpu) PerfBackend.GPU else PerfBackend.CPU,
+            selected = PerfBackend.CPU,
+            fallbackOccurred = preferGpu,
+            fallbackReason = if (preferGpu) "gpu_init_failed" else null,
+        )
         return InferenceBackend.CPU
     }
 
@@ -96,12 +145,29 @@ class LiteRTEngine(
     suspend fun startConversation(
         memoryContext: MemoryContext,
         history: List<ChatTurn> = emptyList(),
-    ) = startConversationInternal(memoryContext, history, PromptBuilder.buildSystemInstruction(memoryContext), CHAT_SAMPLER)
+    ) = startConversationInternal(memoryContext, history, buildTimedSystemInstruction(memoryContext, voice = false), CHAT_SAMPLER)
 
     suspend fun startVoiceConversation(
         memoryContext: MemoryContext,
         history: List<ChatTurn> = emptyList(),
-    ) = startConversationInternal(memoryContext, history, PromptBuilder.buildVoiceSystemInstruction(memoryContext), VOICE_SAMPLER)
+    ) = startConversationInternal(memoryContext, history, buildTimedSystemInstruction(memoryContext, voice = true), VOICE_SAMPLER)
+
+    /**
+     * Builds the system instruction exactly as before, but records how long it took and its length.
+     * The produced string is identical to calling [PromptBuilder] directly — prompt content is
+     * unchanged; this only measures around it.
+     */
+    private fun buildTimedSystemInstruction(memoryContext: MemoryContext, voice: Boolean): String {
+        val start = SystemClock.elapsedRealtimeNanos()
+        val instruction = if (voice) {
+            PromptBuilder.buildVoiceSystemInstruction(memoryContext)
+        } else {
+            PromptBuilder.buildSystemInstruction(memoryContext)
+        }
+        lastPromptBuildMs = PerfCalc.nanosToMs(SystemClock.elapsedRealtimeNanos() - start)
+        lastSystemInstructionLength = instruction.length
+        return instruction
+    }
 
     private suspend fun startConversationInternal(
         memoryContext: MemoryContext,
@@ -120,6 +186,7 @@ class LiteRTEngine(
         }
         // An empty system instruction (Contents.of("")) can make the small model emit empty
         // or broken output, so only set it when the backend actually provides one.
+        val convStart = SystemClock.elapsedRealtimeNanos()
         conversation = eng.createConversation(
             if (systemInstruction.isBlank()) {
                 ConversationConfig(
@@ -134,6 +201,7 @@ class LiteRTEngine(
                 )
             },
         )
+        lastConversationCreationMs = PerfCalc.nanosToMs(SystemClock.elapsedRealtimeNanos() - convStart)
     }
 
     fun hasActiveConversation(): Boolean = conversation != null

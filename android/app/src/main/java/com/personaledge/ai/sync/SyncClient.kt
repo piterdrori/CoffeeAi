@@ -1,6 +1,7 @@
 package com.personaledge.ai.sync
 
 import android.content.Context
+import android.os.SystemClock
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -8,6 +9,9 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.personaledge.ai.BuildConfig
 import com.personaledge.ai.home.ProfileStore
 import com.personaledge.ai.inference.MemoryContext
+import com.personaledge.ai.perf.PerfCalc
+import com.personaledge.ai.perf.PrefetchOutcome
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
@@ -32,6 +36,27 @@ data class BackendConfig(
     val useGpu: Boolean = false,
     val autoTts: Boolean = true,
 )
+
+/** Stage 0: coarse prefetch telemetry (counts + timing only; no chunk/config content). */
+data class PrefetchTelemetry(
+    val outcome: PrefetchOutcome,
+    val latencyMs: Long,
+    val chunkCount: Int,
+    val contextCharacterCount: Int,
+)
+
+/** Return type pairing the memory context with its instrumentation. */
+data class PrefetchResult(
+    val context: MemoryContext?,
+    val telemetry: PrefetchTelemetry,
+)
+
+/** Internal mutable holder filled by [SyncClient] while a prefetch runs. */
+internal class PrefetchProbe {
+    var outcome: PrefetchOutcome = PrefetchOutcome.OTHER
+    var chunkCount: Int = 0
+    var contextCharacterCount: Int = 0
+}
 
 class SyncClient(
     private val context: Context,
@@ -78,19 +103,52 @@ class SyncClient(
 
     /** Best-effort prefetch with a short deadline so chat is not blocked on slow networks. */
     suspend fun prefetchQuick(query: String, timeoutMs: Long = 2_500L): MemoryContext? =
+        prefetchQuickMeasured(query, timeoutMs).context
+
+    /**
+     * Stage 0 instrumentation wrapper. Behaviorally identical to [prefetchQuick] (same client, same
+     * timeout, same offline-fallback semantics) but also returns timing + a coarse outcome category.
+     * Records COUNTS ONLY (chunk count, context character count) — never chunk/config content.
+     */
+    suspend fun prefetchQuickMeasured(query: String, timeoutMs: Long = 2_500L): PrefetchResult =
         withContext(Dispatchers.IO) {
-            withTimeoutOrNull(timeoutMs) {
+            val start = SystemClock.elapsedRealtimeNanos()
+            val probe = PrefetchProbe()
+            var threw: Throwable? = null
+            val context = withTimeoutOrNull(timeoutMs) {
                 try {
-                    prefetchInternal(query, quickClient)
-                } catch (_: Exception) {
+                    prefetchInternal(query, quickClient, probe)
+                } catch (e: Exception) {
+                    threw = e
                     null
                 }
             }
+            val latencyMs = PerfCalc.nanosToMs(SystemClock.elapsedRealtimeNanos() - start)
+            val outcome = when {
+                context != null && threw == null -> probe.outcome // SUCCESS or OFFLINE (unreachable)
+                threw is CancellationException -> PrefetchOutcome.TIMEOUT
+                threw != null -> classifyPrefetchError(threw!!)
+                else -> PrefetchOutcome.TIMEOUT // withTimeoutOrNull deadline hit
+            }
+            PrefetchResult(context, PrefetchTelemetry(outcome, latencyMs, probe.chunkCount, probe.contextCharacterCount))
         }
+
+    private fun classifyPrefetchError(t: Throwable): PrefetchOutcome {
+        val msg = t.message.orEmpty()
+        return when {
+            t is org.json.JSONException -> PrefetchOutcome.PARSE_FAILURE
+            msg.contains("authenticate", ignoreCase = true) -> PrefetchOutcome.AUTH_FAILURE
+            else -> PrefetchOutcome.OTHER
+        }
+    }
 
     suspend fun offlineContext(): MemoryContext = getOfflineContext()
 
-    private suspend fun prefetchInternal(query: String, httpClient: OkHttpClient): MemoryContext {
+    private suspend fun prefetchInternal(
+        query: String,
+        httpClient: OkHttpClient,
+        probe: PrefetchProbe? = null,
+    ): MemoryContext {
         val config = getBackendConfig()
         val body = JSONObject().put("query", query).toString()
         val response = postWithFallback("/v1/memory/prefetch", body, config, httpClient)
@@ -100,6 +158,12 @@ class SyncClient(
             val chunks = json.optJSONArray("chunks")?.let { arr ->
                 (0 until arr.length()).map { arr.getJSONObject(it).getString("content") }
             } ?: emptyList()
+
+            probe?.apply {
+                outcome = PrefetchOutcome.SUCCESS
+                chunkCount = chunks.size
+                contextCharacterCount = chunks.sumOf { it.length }
+            }
 
             configObj?.let {
                 dao.saveConfig(
@@ -131,6 +195,8 @@ class SyncClient(
                 memoryChunks = chunks.ifEmpty { dao.getMemoryTexts() },
             )
         } else {
+            // Backend unreachable / non-2xx (postWithFallback returned null): use offline context.
+            probe?.outcome = PrefetchOutcome.OFFLINE
             return getOfflineContext()
         }
     }

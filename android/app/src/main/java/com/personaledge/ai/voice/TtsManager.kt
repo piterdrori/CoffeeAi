@@ -37,7 +37,14 @@ class TtsManager(context: Context) {
     private var audioTrack: AudioTrack? = null
     private var speakJob: Job? = null
     private var audioFocusRequest: AudioFocusRequest? = null
-    private val speakQueue = ArrayDeque<String>()
+    private val speakQueue = ArrayDeque<Pair<String, Long>>()
+
+    /**
+     * Identity of the currently-valid speech. 0 = none/invalidated. A new response gets a fresh id
+     * (from the caller); [stop] resets it to 0 so any late completion callback is recognized as stale.
+     */
+    @Volatile
+    private var currentSpeechId = 0L
 
     @Volatile
     private var stopped = false
@@ -58,7 +65,8 @@ class TtsManager(context: Context) {
     val error: StateFlow<String?> = _error
 
     var autoReadReplies: Boolean = true
-    var onSpeakComplete: (() -> Unit)? = null
+    /** Invoked with the [speechId] of the utterance that just finished, so callers can reject stale callbacks. */
+    var onSpeakComplete: ((speechId: Long) -> Unit)? = null
 
     init {
         scope.launch {
@@ -191,7 +199,7 @@ class TtsManager(context: Context) {
         }
     }
 
-    fun speak(text: String) {
+    fun speak(text: String, speechId: Long = 0L) {
         if (released || !_isReady.value || text.isBlank()) return
         val cleaned = text
             .replace(Regex("```[\\s\\S]*?```"), " ")
@@ -203,9 +211,11 @@ class TtsManager(context: Context) {
         if (cleaned.isBlank()) return
 
         if (_isSpeaking.value) {
-            speakQueue.addLast(cleaned)
+            speakQueue.addLast(cleaned to speechId)
             return
         }
+        currentSpeechId = speechId
+        Log.i(TAG, "TTS enqueue+start speechId=$speechId chars=${cleaned.length}")
 
         speakJob?.cancel()
         speakJob = scope.launch {
@@ -251,10 +261,10 @@ class TtsManager(context: Context) {
     private fun drainSpeakQueue() {
         if (stopped) return
         val next = speakQueue.removeFirstOrNull() ?: run {
-            onSpeakComplete?.invoke()
+            onSpeakComplete?.invoke(currentSpeechId)
             return
         }
-        speak(next)
+        speak(next.first, next.second)
     }
 
     private suspend fun speakWithPiper(cleaned: String) {
@@ -358,6 +368,7 @@ class TtsManager(context: Context) {
         )
         // #endregion
         stopped = true
+        currentSpeechId = 0L
         speakQueue.clear()
         speakJob?.cancel()
         speakJob = null
