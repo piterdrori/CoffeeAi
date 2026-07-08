@@ -13,6 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import settings
+from devices_api import DEVICE_SCOPED_PREFIXES, PUBLIC_DEVICE_PATHS, router as devices_router
+from memory_api import MEMORY_DEVICE_SCOPED_PREFIXES, router as memory_router
 from memory.provider import get_memory_provider
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -27,6 +29,7 @@ PUBLIC_PATHS = {
     "/download/apk/info",
     "/v1/app/version",
     "/v1/connection-hints",
+    *PUBLIC_DEVICE_PATHS,
 }
 
 
@@ -70,10 +73,20 @@ app = FastAPI(title="Personal Edge AI Backend", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    # Header-based auth only (API key / bearer). No cookie auth, so credentials are not needed —
+    # this avoids the unsafe "* origins + credentials" combination.
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(devices_router)
+app.include_router(memory_router)
+
+# Device-scoped (bearer) and admin (X-Admin-Key) routes; auth enforced by route dependencies, so
+# they bypass the legacy shared-key middleware. Specific prefixes so legacy /v1/memory/{prefetch,
+# sync,<id>} routes are unaffected.
+_BEARER_OR_ADMIN_PREFIXES = (*DEVICE_SCOPED_PREFIXES, *MEMORY_DEVICE_SCOPED_PREFIXES)
 
 
 @app.middleware("http")
@@ -82,6 +95,15 @@ async def api_key_auth_middleware(request: Request, call_next):
     if path in PUBLIC_PATHS or path.startswith("/static/"):
         return await call_next(request)
 
+    # Device-scoped / admin routes authenticate via their own dependencies (bearer token /
+    # X-Admin-Key) — NOT the legacy shared key.
+    if any(path.startswith(prefix) for prefix in _BEARER_OR_ADMIN_PREFIXES):
+        return await call_next(request)
+
+    # Legacy + bootstrap routes (memory/sync/config/support + device registration) still use the
+    # shared API key. This is a bounded compatibility window: new durable/device-scoped data must
+    # move to bearer-token auth. The shared key must be rotated in production and retired once the
+    # remaining legacy memory routes are migrated (see docs/backend-stage1.md).
     api_key = request.headers.get("x-api-key") or request.headers.get("authorization", "").removeprefix("Bearer ").strip()
     if not api_key or api_key != settings.API_KEY:
         return JSONResponse(status_code=401, content={"detail": "Invalid or missing API key"})

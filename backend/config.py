@@ -36,6 +36,35 @@ class Settings(BaseSettings):
     # External APK download (GitHub Releases, etc.) when not stored on this server.
     APK_DOWNLOAD_URL: str = ""
 
+    # --- Stage 1: durable device identity (Supabase/Postgres) -------------------------------------
+    # Server-only. Never shipped to Android. When both are set, device data is stored durably in
+    # Supabase (PostgREST via service role); otherwise a non-durable in-memory store is used so the
+    # API still boots for local dev / tests.
+    SUPABASE_URL: str = ""
+    SUPABASE_SERVICE_ROLE_KEY: str = ""
+    # Server-side pepper mixed into the device-token hash (defense in depth if the DB leaks). Change
+    # in production. Never sent to the client.
+    DEVICE_TOKEN_SIGNING_SECRET: str = "dev-device-pepper-change-me"
+    # Best-effort per-instance bootstrap rate limit for POST /v1/devices/register.
+    DEVICE_REGISTER_MAX_PER_WINDOW: int = 10
+    DEVICE_REGISTER_WINDOW_SECONDS: int = 600
+
+    # --- Stage 2: memory foundation --------------------------------------------------------------
+    # Server-only key that authorizes knowledge-document writes. Must NOT be a device bearer token
+    # and must NOT be the shared APK key. Empty disables the knowledge write path.
+    KNOWLEDGE_ADMIN_KEY: str = ""
+    # Memory Context Packet bounds.
+    MEMORY_QUERY_MAX_CHARS: int = 2000
+    MEMORY_SESSION_ID_MAX_CHARS: int = 128
+    MEMORY_SUMMARY_MAX_CHARS: int = 4000
+    MEMORY_CONTENT_MAX_CHARS: int = 4000
+    MEMORY_BUDGET_MIN: int = 200
+    MEMORY_BUDGET_MAX: int = 1200
+
+    @property
+    def supabase_enabled(self) -> bool:
+        return bool(self.SUPABASE_URL.strip() and self.SUPABASE_SERVICE_ROLE_KEY.strip())
+
     @property
     def chroma_dir(self) -> Path:
         return self.DATA_DIR / "chroma"

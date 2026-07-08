@@ -76,6 +76,52 @@ class SyncClient(
 
     val sessionId: String = UUID.randomUUID().toString()
 
+    // Stage 1 device identity. Cached so the (non-suspend) request builder can attach the bearer
+    // header without a DataStore read. Populated at startup / after registration.
+    @Volatile
+    private var cachedDeviceToken: String? = null
+
+    /** Stable per-installation id, created and persisted on first use. */
+    private suspend fun getOrCreateInstallId(): String {
+        val prefs = context.syncDataStore.data.first()
+        val existing = prefs[installIdKey]
+        if (DeviceIdentityLogic.isValidInstallId(existing)) return existing!!
+        val fresh = DeviceIdentityLogic.newInstallId()
+        context.syncDataStore.edit { it[installIdKey] = fresh }
+        return fresh
+    }
+
+    suspend fun getDeviceToken(): String? {
+        val token = context.syncDataStore.data.first()[deviceTokenKey]
+        cachedDeviceToken = token
+        return token
+    }
+
+    /**
+     * Best-effort device registration. Generates+persists an install_id on first launch, registers
+     * with the backend using the legacy shared key ONLY as the bootstrap gate, and stores the issued
+     * device token. Failure never blocks local chat/voice — the app stays fully offline-capable.
+     */
+    suspend fun ensureDeviceRegistered() = withContext(Dispatchers.IO) {
+        try {
+            val existing = getDeviceToken()
+            if (!DeviceIdentityLogic.needsRegistration(existing)) return@withContext
+            val installId = getOrCreateInstallId()
+            val config = getBackendConfig()
+            val body = JSONObject()
+                .put("install_id", installId)
+                .put("platform", "android")
+                .put("app_version", BuildConfig.VERSION_NAME)
+                .toString()
+            val response = postWithFallback("/v1/devices/register", body, config, quickClient) ?: return@withContext
+            val token = JSONObject(response).optString("device_token").takeIf { it.isNotBlank() } ?: return@withContext
+            context.syncDataStore.edit { it[deviceTokenKey] = token }
+            cachedDeviceToken = token
+        } catch (_: Exception) {
+            // Registration is optional in Stage 1; ignore and retry on a later launch.
+        }
+    }
+
     suspend fun getBackendConfig(): BackendConfig {
         val prefs = context.syncDataStore.data.first()
         return BackendConfig(
@@ -340,6 +386,11 @@ class SyncClient(
                         if (config.apiKey.isNotBlank()) {
                             addHeader("X-API-Key", config.apiKey)
                         }
+                        // Attach the device bearer token when available so device-scoped routes can
+                        // authenticate. Harmless for legacy routes (the backend checks X-API-Key first).
+                        DeviceIdentityLogic.bearerHeader(cachedDeviceToken)?.let {
+                            addHeader("Authorization", it)
+                        }
                     }
                     .build()
                 httpClient.newCall(request).execute().use { response ->
@@ -364,5 +415,7 @@ class SyncClient(
         private val apiKeyKey = stringPreferencesKey("api_key")
         private val useGpuKey = booleanPreferencesKey("use_gpu")
         private val autoTtsKey = booleanPreferencesKey("auto_tts")
+        private val installIdKey = stringPreferencesKey("device_install_id")
+        private val deviceTokenKey = stringPreferencesKey("device_token")
     }
 }

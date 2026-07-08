@@ -65,5 +65,9 @@ class EdgeAiApplication : Application() {
                 modelRepository.setActiveModel(default.id)
             }
         }
+
+        // Stage 1: register a durable device identity in the background. Best-effort — never blocks
+        // local chat/voice, and failure simply retries on a later launch.
+        appScope.launch { syncClient.ensureDeviceRegistered() }
     }
 }

@@ -1,8 +1,27 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("com.google.devtools.ksp")
+}
+
+// Registration bootstrap key for POST /v1/devices/register (and legacy compatibility). Sourced from
+// an UNTRACKED local build source so it is never hardcoded in git. Precedence: Gradle project
+// property -> environment variable -> android/local.properties. Missing -> empty string (never the
+// old dev default): the app then works fully offline and device registration fails safely.
+// NOTE: this ends up in BuildConfig and is APK-extractable — it is a bootstrap value, NOT a true
+// secret. The Supabase service-role key must never be placed in the Android app.
+val coffeeaiBootstrapKey: String = run {
+    val fromProperty = (project.findProperty("COFFEEAI_BOOTSTRAP_KEY") as String?)?.takeIf { it.isNotBlank() }
+    val fromEnv = System.getenv("COFFEEAI_BOOTSTRAP_KEY")?.takeIf { it.isNotBlank() }
+    val fromLocalProps = rootProject.file("local.properties").takeIf { it.exists() }?.let { file ->
+        Properties().apply { FileInputStream(file).use { load(it) } }
+            .getProperty("COFFEEAI_BOOTSTRAP_KEY")?.takeIf { it.isNotBlank() }
+    }
+    fromProperty ?: fromEnv ?: fromLocalProps ?: ""
 }
 
 android {
@@ -17,7 +36,10 @@ android {
         versionName = "1.4.12"
 
         buildConfigField("String", "CLOUD_URL", "\"https://personal-edge-ai.vercel.app\"")
-        buildConfigField("String", "CLOUD_API_KEY", "\"dev-api-key-change-me\"")
+        // Escape backslashes and quotes so arbitrary key characters are safe inside the generated
+        // Java string literal. Same source for debug and release (defined in defaultConfig).
+        val escapedBootstrapKey = coffeeaiBootstrapKey.replace("\\", "\\\\").replace("\"", "\\\"")
+        buildConfigField("String", "CLOUD_API_KEY", "\"$escapedBootstrapKey\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
