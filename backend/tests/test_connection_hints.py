@@ -58,12 +58,16 @@ def test_main_connection_hints_source_has_no_api_key_hint():
 
 
 def test_admin_html_contains_no_active_api_key():
-    html = (Path(__file__).resolve().parents[1] / "web" / "admin.html").read_text(encoding="utf-8")
-    assert "api_key_hint" not in html
-    assert "Default (dev):" not in html
-    assert settings.API_KEY not in html
+    # Legacy admin.html was retired in Stage 6A-1; Control Center assets must stay clean.
+    control = Path(__file__).resolve().parents[1] / "web" / "control"
+    assert not (Path(__file__).resolve().parents[1] / "web" / "admin.html").exists()
+    for name in ("login.html", "shell.html", "login.js", "shell.js"):
+        html = (control / name).read_text(encoding="utf-8")
+        assert "api_key_hint" not in html
+        assert "Default (dev):" not in html
+        assert "localStorage" not in html
+        assert settings.API_KEY not in html
 
 
-def test_setup_html_does_not_claim_key_is_shown_on_home_page():
-    html = (Path(__file__).resolve().parents[1] / "web" / "setup.html").read_text(encoding="utf-8")
-    assert "shown on the" not in html.lower()
+def test_legacy_setup_html_retired():
+    assert not (Path(__file__).resolve().parents[1] / "web" / "setup.html").exists()

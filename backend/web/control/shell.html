@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{{PAGE_TITLE}} — CoffeeAI Control Center</title>
+  <link rel="stylesheet" href="/static/control/control.css" />
+</head>
+<body class="cc-app" data-active-path="{{ACTIVE_PATH}}">
+  <div class="cc-backdrop" id="navBackdrop" hidden></div>
+
+  <aside class="cc-sidebar" id="sidebar" aria-label="Control Center navigation">
+    <div class="cc-sidebar-brand">
+      <span class="cc-brand-mark" aria-hidden="true"></span>
+      <div>
+        <p class="cc-brand-title">CoffeeAI</p>
+        <p class="cc-brand-sub">Control Center</p>
+      </div>
+    </div>
+
+    <nav class="cc-sidebar-nav" id="sidebarNav">
+      <a href="/admin" data-path="/admin" class="cc-nav-link{{ACTIVE_OVERVIEW}}">
+        <span class="cc-nav-icon" aria-hidden="true">◇</span>
+        <span>Overview</span>
+      </a>
+      <a href="/admin/users" data-path="/admin/users" class="cc-nav-link{{ACTIVE_USERS}}">
+        <span class="cc-nav-icon" aria-hidden="true">◎</span>
+        <span>Users</span>
+      </a>
+      <a href="/admin/content" data-path="/admin/content" class="cc-nav-link{{ACTIVE_CONTENT}}">
+        <span class="cc-nav-icon" aria-hidden="true">▣</span>
+        <span>Content</span>
+      </a>
+      <a href="/admin/action-flows" data-path="/admin/action-flows" class="cc-nav-link{{ACTIVE_FLOWS}}">
+        <span class="cc-nav-icon" aria-hidden="true">⇢</span>
+        <span>Action Flows</span>
+      </a>
+      <a href="/admin/hermes" data-path="/admin/hermes" class="cc-nav-link{{ACTIVE_HERMES}}">
+        <span class="cc-nav-icon" aria-hidden="true">⬡</span>
+        <span>Hermes</span>
+      </a>
+      <a href="/admin/settings" data-path="/admin/settings" class="cc-nav-link{{ACTIVE_SETTINGS}}">
+        <span class="cc-nav-icon" aria-hidden="true">⚙</span>
+        <span>Settings</span>
+      </a>
+    </nav>
+
+    <div class="cc-sidebar-foot">
+      <p class="cc-sidebar-user" id="adminDisplayName">{{USERNAME}}</p>
+      <button type="button" id="logoutBtn" class="cc-logout-btn">Logout</button>
+    </div>
+  </aside>
+
+  <div class="cc-workspace">
+    <header class="cc-topbar">
+      <button type="button" class="cc-menu-btn" id="menuBtn" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+        <span></span><span></span><span></span>
+      </button>
+      <div class="cc-topbar-text">
+        <h1 id="pageTitle">{{PAGE_TITLE}}</h1>
+        <p id="pageDescription" class="cc-page-desc">{{PAGE_DESCRIPTION}}</p>
+      </div>
+      <span class="cc-env-badge" id="envBadge" data-env="{{ENV_BADGE}}">{{ENV_BADGE}}</span>
+    </header>
+
+    <main class="cc-content">
+      <section class="cc-card cc-placeholder-card" id="sectionPlaceholder">
+        <h2 class="cc-card-title">{{PAGE_TITLE}}</h2>
+        <p class="cc-card-body">This section will be built in the next stage.</p>
+      </section>
+
+      <div id="overviewRoot" class="cc-overview" hidden>
+        <div class="cc-overview-toolbar">
+          <button type="button" id="overviewRefreshBtn" class="cc-btn cc-btn-secondary" aria-label="Refresh Overview">
+            Refresh
+          </button>
+        </div>
+
+        <div id="overviewStatus" class="cc-overview-status" role="status" aria-live="polite" hidden></div>
+
+        <div id="overviewError" class="cc-overview-error" role="alert" hidden>
+          <p>Unable to load the Overview right now.</p>
+          <button type="button" id="overviewRetryBtn" class="cc-btn cc-btn-primary">Retry</button>
+        </div>
+
+        <div id="overviewGrid" class="cc-overview-grid" aria-busy="true">
+          <article class="cc-stat-card" id="cardBackend" data-card="backend">
+            <h2 class="cc-stat-title">Backend</h2>
+            <p class="cc-stat-value" id="valBackend"><span class="cc-skeleton" aria-hidden="true">—</span></p>
+            <p class="cc-stat-badge" id="badgeBackend"><span class="cc-sr-only">Loading</span></p>
+          </article>
+          <article class="cc-stat-card" id="cardDatabase" data-card="database">
+            <h2 class="cc-stat-title">Database</h2>
+            <p class="cc-stat-value" id="valDatabase"><span class="cc-skeleton" aria-hidden="true">—</span></p>
+            <p class="cc-stat-badge" id="badgeDatabase"><span class="cc-sr-only">Loading</span></p>
+          </article>
+          <article class="cc-stat-card" id="cardHermes" data-card="hermes">
+            <h2 class="cc-stat-title">Hermes</h2>
+            <p class="cc-stat-value" id="valHermes"><span class="cc-skeleton" aria-hidden="true">—</span></p>
+            <p class="cc-stat-meta" id="metaHermesVersion"></p>
+            <p class="cc-stat-meta" id="metaHermesActivity"></p>
+            <p class="cc-stat-badge" id="badgeHermes"><span class="cc-sr-only">Loading</span></p>
+          </article>
+          <article class="cc-stat-card" id="cardUsers" data-card="users">
+            <h2 class="cc-stat-title">Connected Users</h2>
+            <p class="cc-stat-value" id="valUsers"><span class="cc-skeleton" aria-hidden="true">—</span></p>
+            <p class="cc-stat-meta">Registered with the backend</p>
+          </article>
+          <article class="cc-stat-card" id="cardProposals" data-card="proposals">
+            <h2 class="cc-stat-title">Memory Proposals</h2>
+            <p class="cc-stat-value" id="valProposals"><span class="cc-skeleton" aria-hidden="true">—</span></p>
+            <p class="cc-stat-meta">Waiting for review</p>
+            <p class="cc-stat-actions" id="proposalsActions" hidden>
+              <a href="/admin/content" class="cc-btn cc-btn-link" id="reviewProposalsLink">Review</a>
+            </p>
+          </article>
+          <article class="cc-stat-card" id="cardFlows" data-card="flows">
+            <h2 class="cc-stat-title">Active Action Flows</h2>
+            <p class="cc-stat-value" id="valFlows"><span class="cc-skeleton" aria-hidden="true">—</span></p>
+            <p class="cc-stat-meta" id="metaFlows"></p>
+          </article>
+        </div>
+
+        <section class="cc-card cc-activity-card" id="recentActivitySection" aria-labelledby="recentActivityTitle">
+          <h2 class="cc-card-title" id="recentActivityTitle">Recent Activity</h2>
+          <ul class="cc-activity-list" id="recentActivityList"></ul>
+          <p class="cc-activity-empty" id="recentActivityEmpty" hidden>No recent activity yet.</p>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script src="/static/control/shell.js"></script>
+</body>
+</html>

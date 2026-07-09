@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from admin_api import router as admin_router
 from config import settings
 from devices_api import DEVICE_SCOPED_PREFIXES, PUBLIC_DEVICE_PATHS, router as devices_router
 from memory_api import MEMORY_DEVICE_SCOPED_PREFIXES, router as memory_router
@@ -24,8 +25,7 @@ PUBLIC_PATHS = {
     "/",
     "/health",
     "/setup",
-    "/admin",
-    "/admin/",
+    "/admin/login",
     "/download/apk",
     "/download/apk/info",
     "/v1/app/version",
@@ -83,10 +83,11 @@ app.add_middleware(
 
 app.include_router(devices_router)
 app.include_router(memory_router)
+app.include_router(admin_router)
 
-# Device-scoped (bearer) and admin (X-Admin-Key) routes; auth enforced by route dependencies, so
-# they bypass the legacy shared-key middleware. Specific prefixes so legacy /v1/memory/{prefetch,
-# sync,<id>} routes are unaffected.
+# Device-scoped (bearer) and knowledge-admin (X-Admin-Key) routes; auth enforced by route
+# dependencies, so they bypass the legacy shared-key middleware. Specific prefixes so legacy
+# /v1/memory/{prefetch,sync,<id>} routes are unaffected.
 _BEARER_OR_ADMIN_PREFIXES = (*DEVICE_SCOPED_PREFIXES, *MEMORY_DEVICE_SCOPED_PREFIXES)
 
 
@@ -96,7 +97,11 @@ async def api_key_auth_middleware(request: Request, call_next):
     if path in PUBLIC_PATHS or path.startswith("/static/"):
         return await call_next(request)
 
-    # Device-scoped / admin routes authenticate via their own dependencies (bearer token /
+    # Control Center uses its own cookie session — never the shared API_KEY.
+    if path == "/admin" or path.startswith("/admin/"):
+        return await call_next(request)
+
+    # Device-scoped / knowledge-admin routes authenticate via their own dependencies (bearer token /
     # X-Admin-Key) — NOT the legacy shared key.
     if any(path.startswith(prefix) for prefix in _BEARER_OR_ADMIN_PREFIXES):
         return await call_next(request)
@@ -310,25 +315,15 @@ async def list_support_messages(limit: int = 50) -> dict[str, Any]:
 
 
 @app.get("/")
-async def home_page() -> FileResponse:
-    return _serve_web_page("index.html")
+async def home_page() -> RedirectResponse:
+    """Legacy public landing retired — Control Center is the only backend UI."""
+    return RedirectResponse(url="/admin/login", status_code=303)
 
 
 @app.get("/setup")
-async def setup_page() -> FileResponse:
-    return _serve_web_page("setup.html")
-
-
-@app.get("/admin")
-async def admin_dashboard() -> FileResponse:
-    return _serve_web_page("admin.html")
-
-
-def _serve_web_page(filename: str) -> FileResponse:
-    page_path = WEB_DIR / filename
-    if not page_path.exists():
-        raise HTTPException(status_code=404, detail=f"Page not found: {filename}")
-    return FileResponse(page_path)
+async def setup_page() -> RedirectResponse:
+    """Legacy install guide retired — redirect to Control Center login."""
+    return RedirectResponse(url="/admin/login", status_code=303)
 
 
 def _load_release_meta() -> dict[str, Any]:

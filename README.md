@@ -130,7 +130,7 @@ See **[docs/INSTALL-APK.md](docs/INSTALL-APK.md)** for full instructions.
 
 
 
-All endpoints require `X-API-Key` header (except `/`, `/health`, `/setup`, `/admin`, `/download/*`).
+All endpoints require `X-API-Key` header (except `/` and `/setup` which redirect to Control Center login, `/health`, `/admin/login`, `/download/*`).
 
 
 

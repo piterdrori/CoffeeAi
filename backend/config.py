@@ -61,6 +61,18 @@ class Settings(BaseSettings):
     MEMORY_BUDGET_MIN: int = 200
     MEMORY_BUDGET_MAX: int = 1200
 
+    # --- Stage 6A-1: Control Center admin session (server-only; never sent to Android) ----------
+    # Empty password or session secret disables login (fail-closed in production).
+    CONTROL_CENTER_PASSWORD: str = ""
+    CONTROL_CENTER_USERNAME: str = ""  # optional; empty = password-only
+    ADMIN_SESSION_SECRET: str = ""
+    ADMIN_SESSION_TTL_SECONDS: int = 8 * 60 * 60  # 8 hours
+    ADMIN_LOGIN_MAX_FAILURES: int = 8
+    ADMIN_LOGIN_WINDOW_SECONDS: int = 600
+    # None = Secure cookies when VERCEL=1 or COFFEEAI_ENV=production; False for local TestClient.
+    ADMIN_COOKIE_SECURE: bool | None = None
+    ADMIN_COOKIE_SAMESITE: str = "lax"
+
     @property
     def supabase_enabled(self) -> bool:
         return bool(self.SUPABASE_URL.strip() and self.SUPABASE_SERVICE_ROLE_KEY.strip())

@@ -86,6 +86,11 @@ class DeviceStore(ABC):
     @abstractmethod
     async def touch_last_seen(self, device_id: str, app_version: str | None = None) -> None: ...
 
+    @abstractmethod
+    async def count_connected_devices(self) -> int:
+        """Count registered devices that are not revoked. Returns an integer only."""
+        ...
+
 
 class InMemoryDeviceStore(DeviceStore):
     """Non-durable store for local dev / tests. Clearly not for production data."""
@@ -141,6 +146,9 @@ class InMemoryDeviceStore(DeviceStore):
             row["last_seen_at"] = utc_now_iso()
             if app_version:
                 row["app_version"] = app_version
+
+    async def count_connected_devices(self) -> int:
+        return sum(1 for row in self._by_id.values() if row.get("revoked_at") is None)
 
     # Test-only helper (not part of the interface): expose rows for hashing assertions.
     def _debug_rows(self) -> list[dict[str, Any]]:
@@ -299,6 +307,28 @@ class SupabaseDeviceStore(DeviceStore):
         except httpx.HTTPError:
             # Best-effort — never block a normal request on a last_seen update.
             pass
+
+    async def count_connected_devices(self) -> int:
+        try:
+            async with await self._client() as client:
+                resp = await client.get(
+                    f"{self._base}/devices",
+                    params={"revoked_at": "is.null", "select": "id"},
+                    headers={**self._headers, "Prefer": "count=exact", "Range": "0-0"},
+                )
+                if resp.status_code not in (200, 206):
+                    raise DeviceStoreUnavailable("count_failed")
+                content_range = resp.headers.get("content-range") or resp.headers.get("Content-Range") or ""
+                # content-range: 0-0/123 or */0
+                if "/" in content_range:
+                    total = content_range.rsplit("/", 1)[-1]
+                    if total.isdigit():
+                        return int(total)
+                rows = resp.json()
+                return len(rows) if isinstance(rows, list) else 0
+        except httpx.HTTPError as exc:
+            device_store_http_error("count_connected_devices", exc)
+            raise DeviceStoreUnavailable(str(exc)) from exc
 
 
 class RateLimiter:

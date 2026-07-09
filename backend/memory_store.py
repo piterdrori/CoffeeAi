@@ -252,6 +252,16 @@ class MemoryStore(ABC):
     async def write_audit(self, entry: dict[str, Any]) -> None: ...
 
     @abstractmethod
+    async def count_memory_proposals(self) -> int:
+        """Global count of memory_items with status=proposed (non-deleted). Integer only."""
+        ...
+
+    @abstractmethod
+    async def list_recent_audit_actions(self, *, limit: int = 40) -> list[dict[str, Any]]:
+        """Newest-first audit rows with only action + created_at (no details/ids for callers)."""
+        ...
+
+    @abstractmethod
     async def find_memories_by_request(
         self, device_id: str, request_id: str, turn_id: str | None = None,
     ) -> list[dict[str, Any]]: ...
@@ -492,7 +502,34 @@ class InMemoryMemoryStore(MemoryStore):
         return True
 
     async def write_audit(self, entry):
-        self.audit.append(dict(entry))
+        row = dict(entry)
+        if not row.get("created_at"):
+            row["created_at"] = utc_now_iso()
+        self.audit.append(row)
+
+    async def count_memory_proposals(self) -> int:
+        return sum(
+            1
+            for r in self.memories.values()
+            if r.get("status") == "proposed" and r.get("deleted_at") is None
+        )
+
+    async def list_recent_audit_actions(self, *, limit: int = 40) -> list[dict[str, Any]]:
+        rows = sorted(
+            self.audit,
+            key=lambda r: r.get("created_at") or "",
+            reverse=True,
+        )
+        out: list[dict[str, Any]] = []
+        for r in rows[: max(0, limit)]:
+            action = r.get("action")
+            created = r.get("created_at")
+            if not isinstance(action, str) or not action:
+                continue
+            if not isinstance(created, str) or not created:
+                continue
+            out.append({"action": action, "created_at": created})
+        return out
 
     async def find_memories_by_request(self, device_id, request_id, turn_id=None):
         out = []
@@ -905,9 +942,58 @@ class SupabaseMemoryStore(MemoryStore):
 
     async def write_audit(self, entry):
         try:
-            await self._insert("memory_audit_log", entry)
+            payload = dict(entry)
+            if not payload.get("created_at"):
+                payload["created_at"] = utc_now_iso()
+            await self._insert("memory_audit_log", payload)
         except MemoryStoreUnavailable:
             pass  # audit is best-effort; never fail the request on audit write
+
+    async def count_memory_proposals(self) -> int:
+        try:
+            async with self._client() as client:
+                resp = await client.get(
+                    f"{self._base}/memory_items",
+                    params={
+                        "status": "eq.proposed",
+                        "deleted_at": "is.null",
+                        "select": "id",
+                    },
+                    headers={**self._headers, "Prefer": "count=exact", "Range": "0-0"},
+                )
+                if resp.status_code not in (200, 206):
+                    raise MemoryStoreUnavailable("count_failed")
+                content_range = resp.headers.get("content-range") or resp.headers.get("Content-Range") or ""
+                if "/" in content_range:
+                    total = content_range.rsplit("/", 1)[-1]
+                    if total.isdigit():
+                        return int(total)
+                rows = resp.json()
+                return len(rows) if isinstance(rows, list) else 0
+        except httpx.HTTPError as exc:
+            memory_store_http_error("count_memory_proposals", exc)
+            raise MemoryStoreUnavailable(str(exc)) from exc
+
+    async def list_recent_audit_actions(self, *, limit: int = 40) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        try:
+            rows = await self._get("memory_audit_log", {
+                "select": "action,created_at",
+                "order": "created_at.desc",
+                "limit": str(limit),
+            })
+        except MemoryStoreUnavailable:
+            raise
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            action = r.get("action")
+            created = r.get("created_at")
+            if not isinstance(action, str) or not action:
+                continue
+            if not isinstance(created, str) or not created:
+                continue
+            out.append({"action": action, "created_at": created})
+        return out
 
 
 _store: MemoryStore | None = None

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CoffeeAI Control Center — Sign In</title>
+  <link rel="stylesheet" href="/static/control/control.css" />
+</head>
+<body class="cc-login-body">
+  <main class="cc-login-card">
+    <h1>CoffeeAI Control Center</h1>
+    <p class="cc-muted">Sign in to continue</p>
+    <form id="loginForm" autocomplete="off">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required maxlength="256" autofocus />
+      <p id="error" class="cc-error" hidden>Invalid credentials</p>
+      <button type="submit">Sign In</button>
+    </form>
+  </main>
+  <script src="/static/control/login.js"></script>
+</body>
+</html>
