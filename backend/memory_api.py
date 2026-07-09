@@ -1,7 +1,8 @@
-"""Stage 2/3 memory API: Memory Context Packet, session summaries, memory CRUD, and an admin-only
-knowledge ingestion path. Stage 3 adds deterministic retrieval/ranking (``memory_retrieval``).
-Device-owned routes authenticate with the Stage 1 bearer token and are always filtered by
-``request.state.device_id`` — device_id is NEVER taken from the request body.
+"""Stage 2–4 memory API: Memory Context Packet, session summaries, memory CRUD, and an admin-only
+knowledge ingestion path. Stage 3 adds deterministic retrieval/ranking; Stage 4 adds Hermes
+coordination (intent, plan, conflicts, compression). Device-owned routes authenticate with the
+Stage 1 bearer token and are always filtered by ``request.state.device_id`` — device_id is NEVER
+taken from the request body.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from devices_api import require_device
-from memory_retrieval import retrieve_and_pack_context
+from hermes import build_context_packet
 from memory_store import (
     ALLOWED_STATUSES,
     ALLOWED_TYPES,
@@ -37,7 +38,7 @@ MEMORY_DEVICE_SCOPED_PREFIXES = (
     "/v1/memory/knowledge",
 )
 
-# Stage 3 retrieval fan-out caps (broader pool; ranking selects top items).
+# Stage 3/4 retrieval fan-out caps (broader pool; Hermes plan + ranking select top items).
 _MEMORY_CANDIDATE_LIMIT = 100
 _KNOWLEDGE_CANDIDATE_LIMIT = 50
 
@@ -106,7 +107,7 @@ async def memory_context(
         # Fail safe: a valid empty fallback packet so the Android app is never blocked on memory.
         return empty_packet(request_id, language, budget, fallback=True)
 
-    packet, usage = retrieve_and_pack_context(
+    packet, usage = build_context_packet(
         request_id=request_id,
         language=language,
         budget=budget,
@@ -117,7 +118,7 @@ async def memory_context(
         memories=memories,
         knowledge_chunks=knowledge,
     )
-    # Privacy-safe audit: ids + counts + scores only — never query text or memory/content.
+    # Privacy-safe audit: ids + counts + Hermes metadata — never query text or memory/content.
     background.add_task(_audit, store, {
         "device_id": device_id,
         "request_id": request_id,
@@ -135,6 +136,17 @@ async def memory_context(
             "selected_count": usage["selected_count"],
             "score_range": usage["score_range"],
             "audit_items": usage["audit_items"],
+            "hermes_version": usage.get("hermes_version"),
+            "intent": usage.get("intent"),
+            "intent_confidence": usage.get("intent_confidence"),
+            "retrieval_plan": usage.get("retrieval_plan"),
+            "conflicts_detected": usage.get("conflicts_detected"),
+            "conflicts_resolved": usage.get("conflicts_resolved"),
+            "unresolved_conflicts": usage.get("unresolved_conflicts"),
+            "resolution_reasons": usage.get("resolution_reasons"),
+            "compression_applied": usage.get("compression_applied"),
+            "backend_llm_invoked": False,
+            "permanent_memory_writes": 0,
         },
     })
     return packet

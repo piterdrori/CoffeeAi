@@ -163,7 +163,7 @@ def pack_context(
 def empty_packet(request_id: str, language: str, budget: int, *, fallback: bool = False) -> dict[str, Any]:
     return {
         "request_id": request_id,
-        "memory_version": 2,
+        "memory_version": 3,
         "intent": "unknown",
         "language": language,
         "user_profile": [],
@@ -177,6 +177,20 @@ def empty_packet(request_id: str, language: str, budget: int, *, fallback: bool 
         "retrieval_strategy": "deterministic-v1",
         "candidate_count": 0,
         "selected_count": 0,
+        "hermes_version": "hermes-v1",
+        "intent_confidence": 0.0,
+        "retrieval_plan": {
+            "intent": "unknown",
+            "memory_types": [],
+            "include_session_summary": False,
+            "include_machine_knowledge": False,
+            "include_safety": False,
+            "strategy_version": "hermes-v1",
+        },
+        "conflicts_detected": 0,
+        "conflicts_resolved": 0,
+        "unresolved_conflicts": 0,
+        "compression_applied": False,
         "fallback": fallback,
     }
 

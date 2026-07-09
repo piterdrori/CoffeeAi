@@ -282,7 +282,7 @@ def test_successful_admin_create_returns_document_and_chunks(monkeypatch):
         json={
             "product": "STAGE3_ADMIN_SMOKE", "title": "t", "version": "test-v1", "locale": "en",
             "trust_level": "qa", "source": "smoke-test",
-            "chunks": [{"content": "harmless smoke chunk for retrieval"}],
+            "chunks": [{"content": "harmless smoke chunk for retrieval rinse and descale steps"}],
         },
     )
     assert created.status_code == 200
@@ -293,7 +293,7 @@ def test_successful_admin_create_returns_document_and_chunks(monkeypatch):
         "/v1/memory/context",
         headers=hdr,
         json={
-            "query": "harmless smoke chunk",
+            "query": "how to clean and descale machine rinse",
             "product": "STAGE3_ADMIN_SMOKE",
             "product_version": "test-v1",
             "language": "en",

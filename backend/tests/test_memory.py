@@ -64,7 +64,7 @@ def test_empty_context_packet():
     assert body["safety_rules"] == [] and body["recent_summary"] is None
     assert body["fallback"] is False
     assert body["used_token_estimate"] == 0
-    assert body["memory_version"] == 2
+    assert body["memory_version"] == 3
 
 
 # 2 — missing / invalid bearer rejected

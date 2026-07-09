@@ -353,8 +353,9 @@ def test_fallback_when_store_unavailable():
     assert resp.status_code == 200
     body = resp.json()
     assert body["fallback"] is True
-    assert body["memory_version"] == 2
+    assert body["memory_version"] == 3
     assert body["retrieval_strategy"] == RETRIEVAL_STRATEGY_VERSION
+    assert body.get("hermes_version") == "hermes-v1"
 
 
 def test_normalize_query_strips_punctuation_and_stopwords():
@@ -369,6 +370,7 @@ def test_context_packet_has_stage3_metadata():
     _, hdr = register(client, "install-aaaaaaaaaaaaaaaa")
     resp = client.post("/v1/memory/context", json={"query": "hello"}, headers=hdr)
     body = resp.json()
-    assert body["memory_version"] == 2
+    assert body["memory_version"] == 3
     assert body["retrieval_strategy"] == RETRIEVAL_STRATEGY_VERSION
     assert "candidate_count" in body and "selected_count" in body
+    assert body.get("hermes_version") == "hermes-v1"
