@@ -9,6 +9,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from admin_users import classify_device_type
 from devices import DeviceStore, DeviceStoreUnavailable
 from hermes import HERMES_VERSION
 from memory_store import MemoryStore, MemoryStoreUnavailable
@@ -135,9 +136,11 @@ async def _safe_device_health(store: DeviceStore) -> dict[str, bool | str]:
         return {"readable": False, "writable": False}
 
 
-async def _safe_count_devices(store: DeviceStore) -> int | None:
+async def _safe_count_real_devices(store: DeviceStore) -> int | None:
+    """Connected Users = real (coffee-) non-revoked app devices only. Test/unknown are excluded."""
     try:
-        return int(await store.count_connected_devices())
+        devices = await store.list_active_devices()  # non-revoked rows only
+        return sum(1 for d in devices if classify_device_type(d.get("install_id")) == "real")
     except (DeviceStoreUnavailable, Exception):  # noqa: BLE001
         return None
 
@@ -177,7 +180,7 @@ async def build_overview_payload(
         hermes_import_ok = _probe_hermes_import()
 
     health_task = asyncio.create_task(_safe_device_health(device_store))
-    users_task = asyncio.create_task(_safe_count_devices(device_store))
+    users_task = asyncio.create_task(_safe_count_real_devices(device_store))
     proposals_task = asyncio.create_task(_safe_count_proposals(memory_store))
     audit_task = asyncio.create_task(_safe_list_audit(memory_store, limit=40))
 

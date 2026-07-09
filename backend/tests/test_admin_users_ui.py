@@ -19,12 +19,12 @@ WEB_DIR = Path(__file__).resolve().parents[1] / "web"
 CONTROL_DIR = WEB_DIR / "control"
 
 LOCKED_COLUMNS = (
-    "User / Device",
-    "Last Active",
-    "App Version",
+    "Device",
+    "Type",
+    "Backend",
     "Memory",
-    "Personality",
-    "Status",
+    "Last Activity",
+    "App Version",
     "Open",
 )
 
@@ -100,12 +100,13 @@ def test_authenticated_users_contains_ui(client):
     for col in LOCKED_COLUMNS:
         assert col in r.text
     assert 'id="usersSearch"' in r.text
+    assert 'id="usersTypeFilter"' in r.text
     assert 'id="usersMemoryFilter"' in r.text
     assert 'id="usersStatusFilter"' in r.text
     assert 'id="usersRefreshBtn"' in r.text
     assert 'id="usersPrevBtn"' in r.text
     assert 'id="usersNextBtn"' in r.text
-    assert "No users connected yet" in r.text
+    assert "No real users connected yet" in r.text
     assert "Loading users" in r.text
     assert "Unable to load users right now." in r.text
     assert 'id="usersRetryBtn"' in r.text
@@ -142,7 +143,7 @@ def test_users_js_api_calls_and_safety():
     assert "service_role" not in js
     assert 'window.location.href = "/admin/login"' in js
     assert "User not found" in (CONTROL_DIR / "shell.html").read_text(encoding="utf-8")
-    assert "No users connected yet" in (CONTROL_DIR / "shell.html").read_text(encoding="utf-8")
+    assert "No real users connected yet" in (CONTROL_DIR / "shell.html").read_text(encoding="utf-8")
     for banned in ("Revoke", "Assign personality", "Disable memory", "Delete user", "Enable memory"):
         assert banned not in js
 

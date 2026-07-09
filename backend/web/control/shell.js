@@ -394,16 +394,48 @@
   function labelStatus(status) {
     var map = {
       active: "Active",
+      memory_active: "Memory active",
+      registered_only: "Registered only",
       needs_attention: "Needs attention",
       offline: "Offline",
+      test: "Test device",
+      unknown: "Unknown",
     };
     return map[status] || titleCaseStatus(status);
   }
 
   function statusTone(status) {
+    if (status === "active" || status === "memory_active") return "healthy";
+    if (status === "registered_only" || status === "needs_attention") return "warning";
+    if (status === "offline") return "critical";
+    return "warning";
+  }
+
+  function labelType(type) {
+    var map = { real: "Real", test: "Test", unknown: "Unknown" };
+    return map[type] || "Unknown";
+  }
+
+  function typeTone(type) {
+    if (type === "real") return "healthy";
+    return "warning";
+  }
+
+  function labelBackend(status) {
+    var map = {
+      active: "Active",
+      offline: "Offline",
+      registered_only: "Registered only",
+      test: "Test",
+      unknown: "Unknown",
+    };
+    return map[status] || titleCaseStatus(status);
+  }
+
+  function backendTone(status) {
     if (status === "active") return "healthy";
-    if (status === "needs_attention") return "warning";
-    return "critical";
+    if (status === "offline") return "critical";
+    return "warning";
   }
 
   function setUsersLoadingButtons(loading) {
@@ -428,16 +460,26 @@
       if (!u || typeof u.device_id !== "string") return;
       var tr = document.createElement("tr");
 
-      function td(label, htmlOrText, isHtml) {
+      function td(label, text) {
         var cell = document.createElement("td");
         cell.setAttribute("data-label", label);
-        if (isHtml) cell.innerHTML = htmlOrText;
-        else cell.textContent = htmlOrText;
+        cell.textContent = text;
+        return cell;
+      }
+
+      function badgeTd(label, text, tone) {
+        var cell = document.createElement("td");
+        cell.setAttribute("data-label", label);
+        var badge = document.createElement("span");
+        badge.className = "cc-stat-badge";
+        badge.setAttribute("data-tone", tone);
+        badge.textContent = text;
+        cell.appendChild(badge);
         return cell;
       }
 
       var nameCell = document.createElement("td");
-      nameCell.setAttribute("data-label", "User / Device");
+      nameCell.setAttribute("data-label", "Device");
       var name = document.createElement("p");
       name.className = "cc-user-name";
       name.textContent = u.display_name || "Device";
@@ -448,8 +490,8 @@
       nameCell.appendChild(idLine);
       tr.appendChild(nameCell);
 
-      tr.appendChild(td("Last Active", formatRelativeTime(u.last_active)));
-      tr.appendChild(td("App Version", u.app_version || "Unknown"));
+      tr.appendChild(badgeTd("Type", labelType(u.device_type), typeTone(u.device_type)));
+      tr.appendChild(badgeTd("Backend", labelBackend(u.backend_status), backendTone(u.backend_status)));
 
       var memCell = document.createElement("td");
       memCell.setAttribute("data-label", "Memory");
@@ -463,16 +505,8 @@
       if (memSub.textContent) memCell.appendChild(memSub);
       tr.appendChild(memCell);
 
-      tr.appendChild(td("Personality", u.personality || "Default"));
-
-      var statusCell = document.createElement("td");
-      statusCell.setAttribute("data-label", "Status");
-      var badge = document.createElement("span");
-      badge.className = "cc-stat-badge";
-      badge.setAttribute("data-tone", statusTone(u.status));
-      badge.textContent = labelStatus(u.status);
-      statusCell.appendChild(badge);
-      tr.appendChild(statusCell);
+      tr.appendChild(td("Last Activity", formatRelativeTime(u.last_real_activity || u.last_active)));
+      tr.appendChild(td("App Version", u.app_version || "Unknown"));
 
       var openCell = document.createElement("td");
       openCell.setAttribute("data-label", "Open");
@@ -507,12 +541,45 @@
     params.set("page", String(usersState.page || 1));
     params.set("page_size", String(USERS_PAGE_SIZE));
     var search = document.getElementById("usersSearch");
+    var type = document.getElementById("usersTypeFilter");
     var memory = document.getElementById("usersMemoryFilter");
     var status = document.getElementById("usersStatusFilter");
     if (search && search.value.trim()) params.set("search", search.value.trim());
+    if (type && type.value) params.set("type", type.value);
     if (memory && memory.value) params.set("memory", memory.value);
     if (status && status.value) params.set("status", status.value);
     return params.toString();
+  }
+
+  function maybeShowHiddenTestNote() {
+    var note = document.getElementById("usersHiddenNote");
+    var type = document.getElementById("usersTypeFilter");
+    if (!note) return;
+    if (type && type.value) {
+      note.hidden = true;
+      note.textContent = "";
+      return;
+    }
+    fetch("/admin/api/users?type=test&page_size=1", {
+      credentials: "same-origin",
+      headers: { Accept: "application/json" },
+    })
+      .then(function (r) {
+        return r.ok ? r.json() : null;
+      })
+      .then(function (d) {
+        var n = d && typeof d.total === "number" ? d.total : 0;
+        if (n > 0) {
+          note.textContent = n + (n === 1 ? " test device is hidden." : " test devices are hidden.");
+          note.hidden = false;
+        } else {
+          note.hidden = true;
+          note.textContent = "";
+        }
+      })
+      .catch(function () {
+        note.hidden = true;
+      });
   }
 
   function loadUsers() {
@@ -557,6 +624,7 @@
           var empty = document.getElementById("usersEmpty");
           if (empty) empty.hidden = false;
           if (card) card.hidden = true;
+          maybeShowHiddenTestNote();
           updateUsersPagination({ page: 1, page_size: USERS_PAGE_SIZE, total: 0 });
           return;
         }
@@ -599,7 +667,7 @@
       });
       search.addEventListener("change", resetAndLoad);
     }
-    ["usersMemoryFilter", "usersStatusFilter"].forEach(function (id) {
+    ["usersTypeFilter", "usersMemoryFilter", "usersStatusFilter"].forEach(function (id) {
       var el = document.getElementById(id);
       if (el && !el.dataset.bound) {
         el.dataset.bound = "1";
@@ -680,8 +748,10 @@
     grid.innerHTML = "";
     var fields = [
       ["Device ID", data.device_id || "—"],
+      ["Device type", labelType(data.device_type)],
+      ["Backend status", labelBackend(data.backend_status)],
       ["First connected", formatRelativeTime(data.first_connected)],
-      ["Last active", formatRelativeTime(data.last_active)],
+      ["Last active", formatRelativeTime(data.last_real_activity || data.last_active)],
       ["App version", data.app_version || "Unknown"],
       ["Language", data.language || "Unknown"],
       ["Machine model", data.machine_model || "Unknown"],

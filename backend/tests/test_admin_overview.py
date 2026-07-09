@@ -184,9 +184,9 @@ def test_build_overview_counts_and_action_flows(stores):
     devices, memory = stores
 
     async def _run():
-        await _create_device(devices, "a1")
-        await _create_device(devices, "a2")
-        await _create_device(devices, "a3", revoked=True)
+        await _create_device(devices, "coffee-a1")
+        await _create_device(devices, "coffee-a2")
+        await _create_device(devices, "coffee-a3", revoked=True)
         await memory.create_memory("d1", {"type": "preference", "content": "x", "status": "proposed"})
         await memory.create_memory("d1", {"type": "preference", "content": "y", "status": "approved"})
         now = datetime.now(timezone.utc)
@@ -244,7 +244,7 @@ def test_partial_store_failure_does_not_crash():
     devices = InMemoryDeviceStore()
 
     async def _run():
-        await _create_device(devices, "ok")
+        await _create_device(devices, "coffee-ok")
         return await build_overview_payload(
             device_store=devices,
             memory_store=FailingAuditMemoryStore(),
@@ -278,7 +278,7 @@ def test_overview_unauthenticated_401(client):
 
 def test_overview_authenticated_200(client, stores):
     devices, _memory = stores
-    asyncio.run(_create_device(devices, "u1"))
+    asyncio.run(_create_device(devices, "coffee-u1"))
     assert _login(client).status_code == 200
     r = client.get("/admin/api/overview")
     assert r.status_code == 200

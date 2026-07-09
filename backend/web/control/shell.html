@@ -104,7 +104,7 @@
           <article class="cc-stat-card" id="cardUsers" data-card="users">
             <h2 class="cc-stat-title">Connected Users</h2>
             <p class="cc-stat-value" id="valUsers"><span class="cc-skeleton" aria-hidden="true">—</span></p>
-            <p class="cc-stat-meta">Registered with the backend</p>
+            <p class="cc-stat-meta">Real app devices · test excluded</p>
           </article>
           <article class="cc-stat-card" id="cardProposals" data-card="proposals">
             <h2 class="cc-stat-title">Memory Proposals</h2>
@@ -134,6 +134,16 @@
             <label class="cc-field">
               <span class="cc-field-label">Search</span>
               <input type="search" id="usersSearch" class="cc-input" placeholder="Search users" autocomplete="off" />
+            </label>
+            <label class="cc-field">
+              <span class="cc-field-label">Type</span>
+              <select id="usersTypeFilter" class="cc-select">
+                <option value="">Default (hide test)</option>
+                <option value="real">Real</option>
+                <option value="test">Test</option>
+                <option value="unknown">Unknown</option>
+                <option value="all">All</option>
+              </select>
             </label>
             <label class="cc-field">
               <span class="cc-field-label">Memory</span>
@@ -166,8 +176,9 @@
         </div>
 
         <div id="usersEmpty" class="cc-card cc-empty-card" hidden>
-          <h2 class="cc-card-title">No users connected yet</h2>
-          <p class="cc-card-body">Users will appear here after the app registers with the CoffeeAI backend.</p>
+          <h2 class="cc-card-title">No real users connected yet</h2>
+          <p class="cc-card-body">Real app devices appear here once the CoffeeAI app registers with the backend. Test devices are hidden by default — use the Type filter to view them.</p>
+          <p class="cc-card-body cc-sublabel" id="usersHiddenNote" hidden></p>
         </div>
 
         <div id="usersTableCard" class="cc-card cc-users-table-card" aria-busy="true">
@@ -176,12 +187,12 @@
             <table class="cc-users-table" id="usersTable">
               <thead>
                 <tr>
-                  <th scope="col">User / Device</th>
-                  <th scope="col">Last Active</th>
-                  <th scope="col">App Version</th>
+                  <th scope="col">Device</th>
+                  <th scope="col">Type</th>
+                  <th scope="col">Backend</th>
                   <th scope="col">Memory</th>
-                  <th scope="col">Personality</th>
-                  <th scope="col">Status</th>
+                  <th scope="col">Last Activity</th>
+                  <th scope="col">App Version</th>
                   <th scope="col">Open</th>
                 </tr>
               </thead>

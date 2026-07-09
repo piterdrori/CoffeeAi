@@ -235,10 +235,13 @@ async def admin_users_list(request: Request) -> Response:
     search = (qp.get("search") or "").strip() or None
     memory = (qp.get("memory") or "").strip() or None
     status = (qp.get("status") or "").strip() or None
+    type_filter = (qp.get("type") or "").strip().lower() or None
     if memory not in (None, "connected", "not_connected"):
         memory = None
-    if status not in (None, "active", "needs_attention", "offline"):
+    if status not in (None, "active", "memory_active", "registered_only", "offline", "test", "unknown"):
         status = None
+    if type_filter not in (None, "real", "test", "unknown", "all"):
+        type_filter = None
     payload = await list_admin_users(
         device_store=get_device_store(),
         memory_store=get_memory_store(),
@@ -247,6 +250,7 @@ async def admin_users_list(request: Request) -> Response:
         search=search,
         memory=memory,
         status=status,
+        type_filter=type_filter,
     )
     return JSONResponse(content=payload, status_code=200)
 

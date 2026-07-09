@@ -362,7 +362,7 @@ def test_users_shell_has_table_ui(client):
     r = client.get("/admin/users")
     assert r.status_code == 200
     assert 'id="usersRoot"' in r.text
-    assert "User / Device" in r.text
+    assert "Device" in r.text
     assert "This section will be built in the next stage." in r.text  # still in DOM, hidden by JS
 
 

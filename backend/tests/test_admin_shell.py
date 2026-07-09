@@ -117,7 +117,7 @@ def test_authenticated_shell_per_route(client, path, meta):
         assert 'id="overviewRefreshBtn"' in r.text
     elif path == "/admin/users":
         assert 'id="usersRoot"' in r.text
-        assert "User / Device" in r.text
+        assert 'id="usersTypeFilter"' in r.text
         assert 'id="usersSearch"' in r.text
     else:
         assert "This section will be built in the next stage." in r.text

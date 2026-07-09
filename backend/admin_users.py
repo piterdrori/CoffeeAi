@@ -31,6 +31,19 @@ MEMORY_SUCCESS_ACTIONS = frozenset({
     "summary_upsert",
 })
 
+# install_id markers that identify scripted / smoke-test registrations (never the real app).
+TEST_MARKERS = ("stage", "smoke", "test", "verification", "controlled", "temp", "admin")
+
+
+def classify_device_type(install_id: str | None) -> str:
+    """real = genuine Android app (install_id begins 'coffee-'); test = known markers; else unknown."""
+    s = (install_id or "").strip().lower()
+    if s.startswith("coffee-"):
+        return "real"
+    if any(marker in s for marker in TEST_MARKERS):
+        return "test"
+    return "unknown"
+
 
 def parse_ts(value: str | None) -> datetime | None:
     if not value or not isinstance(value, str):
@@ -131,6 +144,23 @@ def _max_iso(*values: str | None) -> str | None:
     return best
 
 
+def genuine_last_active(
+    created_at: str | None,
+    last_seen_at: str | None,
+    last_memory_at: str | None,
+) -> str | None:
+    """Real post-registration activity only. `created_at` is NEVER a fallback; `last_seen_at`
+    counts only if it is more than 5s after `created_at` (registration itself sets last_seen_at)."""
+    values: list[str] = []
+    cts = parse_ts(created_at)
+    sts = parse_ts(last_seen_at)
+    if sts is not None and (cts is None or (sts - cts).total_seconds() > 5):
+        values.append(last_seen_at)  # type: ignore[arg-type]
+    if last_memory_at:
+        values.append(last_memory_at)
+    return _max_iso(*values) if values else None
+
+
 def build_user_row(
     device: dict[str, Any],
     *,
@@ -142,26 +172,57 @@ def build_user_row(
     now = now or datetime.now(timezone.utc)
     device_id = str(device.get("id") or "")
     meta = device.get("metadata") if isinstance(device.get("metadata"), dict) else {}
+    install_id = device.get("install_id") if isinstance(device.get("install_id"), str) else None
+    device_type = classify_device_type(install_id)
     first = device.get("created_at") if isinstance(device.get("created_at"), str) else None
     last_seen = device.get("last_seen_at") if isinstance(device.get("last_seen_at"), str) else None
-    last_active = _max_iso(last_seen, last_memory_at, first)
+    # No created_at fallback — registration alone is NOT activity.
+    last_real = genuine_last_active(first, last_seen, last_memory_at)
     memory_connected = bool(last_memory_at)
+    memory_status = "connected" if memory_connected else "not_connected"
     memory_health = derive_memory_health(last_memory_at=last_memory_at, now=now)
-    status = derive_status(last_active=last_active, memory_health=memory_health, now=now)
+
+    def _within(iso: str | None) -> bool:
+        ts = parse_ts(iso)
+        return ts is not None and (now - ts) <= ACTIVITY_WINDOW
+
+    recent_activity = last_real is not None and _within(last_real)
+    recent_memory = memory_connected and _within(last_memory_at)
+
+    if device_type == "test":
+        backend_status = "test"
+        status = "test"
+    elif device_type == "unknown":
+        backend_status = "unknown"
+        status = "unknown"
+    elif last_real is None:
+        backend_status = "registered_only"
+        status = "registered_only"
+    elif recent_activity:
+        backend_status = "active"
+        status = "memory_active" if recent_memory else "active"
+    else:
+        backend_status = "offline"
+        status = "offline"
+
     counts = counts or {}
     row: dict[str, Any] = {
         "device_id": device_id,
         "display_name": display_name_for(device_id, meta),
         "first_connected": first,
-        "last_active": last_active,
+        "last_active": last_real,
+        "last_real_activity": last_real,
         "app_version": safe_app_version(device),
         "language": safe_language(device),
         "machine_model": safe_machine_model(device),
         "memory_connected": memory_connected,
+        "memory_status": memory_status,
         "memory_health": memory_health,
         "personality": safe_personality(device),
         "approved_memory_count": int(counts.get("approved") or 0),
         "proposed_memory_count": int(counts.get("proposed") or 0),
+        "device_type": device_type,
+        "backend_status": backend_status,
         "status": status,
     }
     if detail:
@@ -170,7 +231,6 @@ def build_user_row(
         row["last_memory_response_ms"] = None
         row["last_memory_error"] = None
         row["recent_action_flows"] = []
-        # list contract keeps status; detail also keeps it for consistency
     return row
 
 
@@ -189,10 +249,12 @@ def _matches_search(row: dict[str, Any], search: str) -> bool:
 
 
 def _sort_key(row: dict[str, Any]) -> tuple[int, str]:
+    # Sorted with reverse=True: rows with real activity (tier 1) always rank above
+    # rows without any (tier 0), which sink to the bottom regardless of order.
     last = row.get("last_active")
     if isinstance(last, str) and last:
-        return (0, last)
-    return (1, "")
+        return (1, last)
+    return (0, "")
 
 
 async def _safe_counts(store: MemoryStore) -> dict[str, dict[str, int]]:
@@ -218,9 +280,10 @@ async def list_admin_users(
     search: str | None = None,
     memory: str | None = None,
     status: str | None = None,
+    type_filter: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Paginated privacy-safe users list. Read-only."""
+    """Paginated privacy-safe users list. Read-only. Hides test devices by default."""
     now = now or datetime.now(timezone.utc)
     page = max(1, int(page or 1))
     page_size = max(1, min(int(page_size or DEFAULT_PAGE_SIZE), MAX_PAGE_SIZE))
@@ -254,6 +317,14 @@ async def list_admin_users(
             detail=False,
         )
         rows.append(row)
+
+    # Device-type filter. Default (no explicit type) hides test devices so the list shows real users.
+    if type_filter == "all":
+        pass
+    elif type_filter in ("real", "test", "unknown"):
+        rows = [r for r in rows if r.get("device_type") == type_filter]
+    else:
+        rows = [r for r in rows if r.get("device_type") != "test"]
 
     if search:
         rows = [r for r in rows if _matches_search(r, search)]
