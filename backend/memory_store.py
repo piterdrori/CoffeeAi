@@ -49,6 +49,14 @@ def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip().lower()
 
 
+def resolve_chunk_index(chunk: dict[str, Any], position: int) -> int:
+    """Return an integer chunk_index; omit/null values fall back to array position."""
+    value = chunk.get("chunk_index")
+    if value is None:
+        return position
+    return int(value)
+
+
 class MemoryStoreUnavailable(RuntimeError):
     """Raised when the durable store is unreachable so routes can fail safe (503)."""
 
@@ -377,7 +385,7 @@ class InMemoryMemoryStore(MemoryStore):
             row = {
                 "id": str(uuid.uuid4()),
                 "document_id": document_id,
-                "chunk_index": chunk.get("chunk_index", i),
+                "chunk_index": resolve_chunk_index(chunk, i),
                 "title": chunk.get("title"),
                 "content": chunk["content"],
                 "token_estimate": chunk.get("token_estimate", estimate_tokens(chunk["content"])),
@@ -600,7 +608,7 @@ class SupabaseMemoryStore(MemoryStore):
     async def add_chunks(self, document_id, chunks):
         payload = [{
             "document_id": document_id,
-            "chunk_index": c.get("chunk_index", i),
+            "chunk_index": resolve_chunk_index(c, i),
             "title": c.get("title"),
             "content": c["content"],
             "token_estimate": c.get("token_estimate", estimate_tokens(c["content"])),

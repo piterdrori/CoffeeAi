@@ -374,10 +374,17 @@ async def create_knowledge_document(
         "locale": _normalize_language(body.locale), "trust_level": body.trust_level,
         "source": body.source, "status": body.status, "metadata": body.metadata or {},
     }
+    doc: dict[str, Any] | None = None
     try:
         doc = await store.create_document(doc_data)
-        chunks = await store.add_chunks(doc["id"], [c.model_dump() for c in body.chunks]) if body.chunks else []
+        chunk_payloads = [c.model_dump(exclude_none=True) for c in body.chunks]
+        chunks = await store.add_chunks(doc["id"], chunk_payloads) if body.chunks else []
     except MemoryStoreUnavailable:
+        if doc and doc.get("id"):
+            try:
+                await store.delete_knowledge_document(doc["id"])
+            except Exception:  # noqa: BLE001 - cleanup is best-effort; never leak store errors
+                pass
         raise HTTPException(status_code=503, detail="memory_store_unavailable")
     background.add_task(_audit, store, {
         "device_id": None, "request_id": str(uuid.uuid4()), "actor": "admin",
