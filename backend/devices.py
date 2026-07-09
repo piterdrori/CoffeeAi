@@ -91,6 +91,16 @@ class DeviceStore(ABC):
         """Count registered devices that are not revoked. Returns an integer only."""
         ...
 
+    @abstractmethod
+    async def list_active_devices(self) -> list[dict[str, Any]]:
+        """Return non-revoked device rows (may include internal fields; callers must sanitize)."""
+        ...
+
+    @abstractmethod
+    async def get_device_by_id(self, device_id: str) -> dict[str, Any] | None:
+        """Return one device row by id, or None. Includes revoked rows so callers can 404 safely."""
+        ...
+
 
 class InMemoryDeviceStore(DeviceStore):
     """Non-durable store for local dev / tests. Clearly not for production data."""
@@ -149,6 +159,13 @@ class InMemoryDeviceStore(DeviceStore):
 
     async def count_connected_devices(self) -> int:
         return sum(1 for row in self._by_id.values() if row.get("revoked_at") is None)
+
+    async def list_active_devices(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._by_id.values() if r.get("revoked_at") is None]
+
+    async def get_device_by_id(self, device_id: str) -> dict[str, Any] | None:
+        row = self._by_id.get(device_id)
+        return dict(row) if row else None
 
     # Test-only helper (not part of the interface): expose rows for hashing assertions.
     def _debug_rows(self) -> list[dict[str, Any]]:
@@ -329,6 +346,43 @@ class SupabaseDeviceStore(DeviceStore):
         except httpx.HTTPError as exc:
             device_store_http_error("count_connected_devices", exc)
             raise DeviceStoreUnavailable(str(exc)) from exc
+
+    async def list_active_devices(self) -> list[dict[str, Any]]:
+        try:
+            async with await self._client() as client:
+                resp = await client.get(
+                    f"{self._base}/devices",
+                    params={
+                        "revoked_at": "is.null",
+                        "select": "id,install_id,platform,app_version,created_at,last_seen_at,revoked_at,metadata",
+                        "order": "last_seen_at.desc",
+                        "limit": "5000",
+                    },
+                )
+                resp.raise_for_status()
+                rows = resp.json()
+                return rows if isinstance(rows, list) else []
+        except httpx.HTTPError as exc:
+            device_store_http_error("list_active_devices", exc)
+            raise DeviceStoreUnavailable(str(exc)) from exc
+
+    async def get_device_by_id(self, device_id: str) -> dict[str, Any] | None:
+        try:
+            async with await self._client() as client:
+                resp = await client.get(
+                    f"{self._base}/devices",
+                    params={
+                        "id": f"eq.{device_id}",
+                        "select": "id,install_id,platform,app_version,created_at,last_seen_at,revoked_at,metadata",
+                        "limit": "1",
+                    },
+                )
+                resp.raise_for_status()
+                rows = resp.json()
+        except httpx.HTTPError as exc:
+            device_store_http_error("get_device_by_id", exc)
+            raise DeviceStoreUnavailable(str(exc)) from exc
+        return rows[0] if rows else None
 
 
 class RateLimiter:

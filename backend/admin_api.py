@@ -1,7 +1,8 @@
-"""Stage 6A: Control Center login + shared authenticated shell.
+"""Stage 6A/6B: Control Center login, shell, Overview, and Users.
 
-6A-1: session auth. 6A-2: shared layout/navigation placeholders.
-6A-3: Overview read API (no visible cards; no other section functionality).
+6A: session auth, shell, Overview.
+6B-1: Users list/detail read APIs.
+6B-2: Visible Users table and User Detail view (read-only).
 """
 from __future__ import annotations
 
@@ -26,6 +27,12 @@ from admin_auth import (
     unauthenticated_html_redirect,
 )
 from admin_overview import build_overview_payload
+from admin_users import (
+    DEFAULT_PAGE_SIZE,
+    MAX_PAGE_SIZE,
+    get_admin_user_detail,
+    list_admin_users,
+)
 from config import settings
 from devices import get_device_store
 from memory_store import get_memory_store
@@ -95,6 +102,8 @@ def _normalize_admin_path(path: str) -> str:
         path = path.rstrip("/")
     if path == "/admin/" or path == "/admin":
         return "/admin"
+    if path.startswith("/admin/users/"):
+        return "/admin/users"
     return path
 
 
@@ -102,16 +111,30 @@ def _env_badge() -> str:
     return "Production" if is_production_runtime() else "Local"
 
 
+def _route_meta_for(path: str) -> dict[str, str]:
+    raw = path
+    if raw != "/" and raw.endswith("/"):
+        raw = raw.rstrip("/")
+    if raw.startswith("/admin/users/") and raw != "/admin/users":
+        return {
+            "title": "User Detail",
+            "description": "Review one CoffeeAI device and its memory connection.",
+            "nav_key": "users",
+        }
+    normalized = _normalize_admin_path(raw)
+    return ROUTE_META.get(normalized) or ROUTE_META["/admin"]
+
+
 def render_shell(*, path: str, username: str) -> HTMLResponse:
     """Render the shared Control Center shell with route-specific copy."""
-    path = _normalize_admin_path(path)
-    meta = ROUTE_META.get(path) or ROUTE_META["/admin"]
+    meta = _route_meta_for(path)
+    nav_path = _normalize_admin_path(path)
     template = (CONTROL_DIR / "shell.html").read_text(encoding="utf-8")
     active_class = " is-active"
     replacements = {
         "{{PAGE_TITLE}}": meta["title"],
         "{{PAGE_DESCRIPTION}}": meta["description"],
-        "{{ACTIVE_PATH}}": path,
+        "{{ACTIVE_PATH}}": nav_path,
         "{{USERNAME}}": username or "admin",
         "{{ENV_BADGE}}": _env_badge(),
     }
@@ -193,6 +216,60 @@ async def admin_overview(request: Request) -> Response:
     return JSONResponse(content=payload, status_code=200)
 
 
+@router.get("/admin/api/users")
+async def admin_users_list(request: Request) -> Response:
+    """Privacy-safe Users list. Session cookie only. Read-only."""
+    session = require_admin_session(request)
+    if not session:
+        return unauthenticated_api()
+    qp = request.query_params
+    try:
+        page = int(qp.get("page") or 1)
+    except ValueError:
+        page = 1
+    try:
+        page_size = int(qp.get("page_size") or DEFAULT_PAGE_SIZE)
+    except ValueError:
+        page_size = DEFAULT_PAGE_SIZE
+    page_size = max(1, min(page_size, MAX_PAGE_SIZE))
+    search = (qp.get("search") or "").strip() or None
+    memory = (qp.get("memory") or "").strip() or None
+    status = (qp.get("status") or "").strip() or None
+    if memory not in (None, "connected", "not_connected"):
+        memory = None
+    if status not in (None, "active", "needs_attention", "offline"):
+        status = None
+    payload = await list_admin_users(
+        device_store=get_device_store(),
+        memory_store=get_memory_store(),
+        page=page,
+        page_size=page_size,
+        search=search,
+        memory=memory,
+        status=status,
+    )
+    return JSONResponse(content=payload, status_code=200)
+
+
+@router.get("/admin/api/users/{device_id}")
+async def admin_user_detail(device_id: str, request: Request) -> Response:
+    """Privacy-safe User detail. Session cookie only. Read-only."""
+    session = require_admin_session(request)
+    if not session:
+        return unauthenticated_api()
+    device_id = (device_id or "").strip()
+    if not device_id or len(device_id) > 64:
+        return JSONResponse(status_code=404, content={"detail": "not_found"})
+    payload = await get_admin_user_detail(
+        device_store=get_device_store(),
+        memory_store=get_memory_store(),
+        device_id=device_id,
+    )
+    if payload is None:
+        return JSONResponse(status_code=404, content={"detail": "not_found"})
+    return JSONResponse(content=payload, status_code=200)
+
+
 def _protected_shell(request: Request) -> Response:
     session = require_admin_session(request)
     if not session:
@@ -215,6 +292,13 @@ async def admin_home(request: Request) -> Response:
 @router.get("/admin/hermes")
 @router.get("/admin/settings")
 async def admin_section_shell(request: Request) -> Response:
+    return _protected_shell(request)
+
+
+@router.get("/admin/users/{device_id}")
+async def admin_user_detail_shell(device_id: str, request: Request) -> Response:
+    """Shared shell for User Detail (read-only UI). device_id is used by client JS only."""
+    del device_id
     return _protected_shell(request)
 
 

@@ -579,6 +579,166 @@ input[type="text"] {
   display: none;
 }
 
+/* ---- Users (6B-2) ---- */
+.cc-users-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.cc-users-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.cc-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 140px;
+}
+
+.cc-field-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--cc-muted);
+}
+
+.cc-input,
+.cc-select {
+  padding: 8px 10px;
+  border: 1px solid var(--cc-border);
+  border-radius: 8px;
+  font-size: 0.92rem;
+  background: var(--cc-card);
+  color: var(--cc-text);
+  min-width: 0;
+}
+
+.cc-input:focus-visible,
+.cc-select:focus-visible {
+  outline: 2px solid var(--cc-accent);
+  outline-offset: 2px;
+}
+
+.cc-users-table-card {
+  padding: 0;
+  overflow: hidden;
+}
+
+.cc-loading-msg {
+  margin: 0;
+  padding: 16px 20px;
+  color: var(--cc-muted);
+  font-size: 0.92rem;
+}
+
+.cc-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.cc-users-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.92rem;
+}
+
+.cc-users-table th,
+.cc-users-table td {
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--cc-border);
+  vertical-align: top;
+}
+
+.cc-users-table th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--cc-muted);
+  background: var(--cc-bg);
+  font-weight: 650;
+}
+
+.cc-user-name {
+  margin: 0;
+  font-weight: 600;
+}
+
+.cc-user-id {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--cc-muted);
+  font-family: ui-monospace, Consolas, monospace;
+  word-break: break-all;
+}
+
+.cc-sublabel {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--cc-muted);
+}
+
+.cc-users-pagination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--cc-border);
+}
+
+.cc-users-page-meta,
+.cc-users-total {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--cc-muted);
+}
+
+.cc-empty-card {
+  margin-bottom: 16px;
+}
+
+.cc-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 24px;
+  margin: 16px 0 0;
+}
+
+.cc-detail-grid dt {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 650;
+  color: var(--cc-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.cc-detail-grid dd {
+  margin: 4px 0 0;
+  font-size: 0.98rem;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.cc-detail-subtitle {
+  margin: 24px 0 10px;
+  font-size: 1rem;
+  font-weight: 650;
+}
+
+.cc-detail-flows {
+  margin-top: 8px;
+}
+
 /* ---- Responsive ---- */
 @media (max-width: 1100px) {
   .cc-overview-grid {
@@ -623,6 +783,39 @@ input[type="text"] {
   .cc-topbar {
     padding: 16px;
   }
+
+  .cc-users-table thead {
+    display: none;
+  }
+
+  .cc-users-table,
+  .cc-users-table tbody,
+  .cc-users-table tr,
+  .cc-users-table td {
+    display: block;
+    width: 100%;
+  }
+
+  .cc-users-table tr {
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--cc-border);
+  }
+
+  .cc-users-table td {
+    border: none;
+    padding: 4px 0;
+  }
+
+  .cc-users-table td::before {
+    content: attr(data-label);
+    display: block;
+    font-size: 0.72rem;
+    font-weight: 650;
+    color: var(--cc-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    margin-bottom: 2px;
+  }
 }
 
 @media (max-width: 640px) {
@@ -632,5 +825,13 @@ input[type="text"] {
 
   .cc-stat-value {
     font-size: 1.35rem;
+  }
+
+  .cc-detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .cc-field {
+    min-width: 100%;
   }
 }

@@ -262,6 +262,16 @@ class MemoryStore(ABC):
         ...
 
     @abstractmethod
+    async def grouped_memory_status_counts(self) -> dict[str, dict[str, int]]:
+        """Map device_id -> {approved: n, proposed: n} for non-deleted items. No content."""
+        ...
+
+    @abstractmethod
+    async def latest_memory_activity_by_device(self) -> dict[str, str]:
+        """Map device_id -> latest successful memory-related audit created_at ISO string."""
+        ...
+
+    @abstractmethod
     async def find_memories_by_request(
         self, device_id: str, request_id: str, turn_id: str | None = None,
     ) -> list[dict[str, Any]]: ...
@@ -530,6 +540,50 @@ class InMemoryMemoryStore(MemoryStore):
                 continue
             out.append({"action": action, "created_at": created})
         return out
+
+    async def grouped_memory_status_counts(self) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        for r in self.memories.values():
+            if r.get("deleted_at") is not None:
+                continue
+            status = r.get("status")
+            if status not in ("approved", "proposed"):
+                continue
+            device_id = r.get("device_id")
+            if not isinstance(device_id, str) or not device_id:
+                continue
+            bucket = out.setdefault(device_id, {"approved": 0, "proposed": 0})
+            if status == "approved":
+                bucket["approved"] += 1
+            else:
+                bucket["proposed"] += 1
+        return out
+
+    async def latest_memory_activity_by_device(self) -> dict[str, str]:
+        success = {
+            "context",
+            "candidates_submit",
+            "candidates_idempotent_replay",
+            "memory_create",
+            "memory_approve",
+            "memory_consolidate",
+            "summary_upsert",
+        }
+        latest: dict[str, str] = {}
+        for r in self.audit:
+            action = r.get("action")
+            created = r.get("created_at")
+            device_id = r.get("device_id")
+            if action not in success:
+                continue
+            if not isinstance(created, str) or not created:
+                continue
+            if not isinstance(device_id, str) or not device_id:
+                continue
+            prev = latest.get(device_id)
+            if prev is None or created > prev:
+                latest[device_id] = created
+        return latest
 
     async def find_memories_by_request(self, device_id, request_id, turn_id=None):
         out = []
@@ -994,6 +1048,64 @@ class SupabaseMemoryStore(MemoryStore):
                 continue
             out.append({"action": action, "created_at": created})
         return out
+
+    async def grouped_memory_status_counts(self) -> dict[str, dict[str, int]]:
+        out: dict[str, dict[str, int]] = {}
+        try:
+            # Bounded fetch of status columns only — no content. Cap protects admin list size.
+            rows = await self._get("memory_items", {
+                "deleted_at": "is.null",
+                "status": "in.(approved,proposed)",
+                "select": "device_id,status",
+                "limit": "20000",
+            })
+        except MemoryStoreUnavailable:
+            raise
+        for r in rows:
+            device_id = r.get("device_id")
+            status = r.get("status")
+            if not isinstance(device_id, str) or not device_id:
+                continue
+            if status not in ("approved", "proposed"):
+                continue
+            bucket = out.setdefault(device_id, {"approved": 0, "proposed": 0})
+            if status == "approved":
+                bucket["approved"] += 1
+            else:
+                bucket["proposed"] += 1
+        return out
+
+    async def latest_memory_activity_by_device(self) -> dict[str, str]:
+        success = (
+            "context",
+            "candidates_submit",
+            "candidates_idempotent_replay",
+            "memory_create",
+            "memory_approve",
+            "memory_consolidate",
+            "summary_upsert",
+        )
+        try:
+            rows = await self._get("memory_audit_log", {
+                "action": f"in.({','.join(success)})",
+                "select": "device_id,created_at,action",
+                "order": "created_at.desc",
+                "limit": "5000",
+            })
+        except MemoryStoreUnavailable:
+            raise
+        latest: dict[str, str] = {}
+        for r in rows:
+            device_id = r.get("device_id")
+            created = r.get("created_at")
+            if not isinstance(device_id, str) or not device_id:
+                continue
+            if not isinstance(created, str) or not created:
+                continue
+            # rows are newest-first; keep first seen per device
+            if device_id not in latest:
+                latest[device_id] = created
+        return latest
 
 
 _store: MemoryStore | None = None

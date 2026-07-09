@@ -82,7 +82,6 @@ def test_authenticated_admin_contains_overview_container(client):
 def test_non_overview_routes_still_placeholders(client):
     _login(client)
     for path in (
-        "/admin/users",
         "/admin/content",
         "/admin/action-flows",
         "/admin/hermes",
@@ -91,8 +90,6 @@ def test_non_overview_routes_still_placeholders(client):
         r = client.get(path)
         assert r.status_code == 200
         assert "This section will be built in the next stage." in r.text
-        assert 'id="overviewRoot"' in r.text  # shared shell includes markup
-        # JS only activates on /admin; placeholder remains the visible section copy
 
 
 def test_six_card_titles_and_recent_activity(client):

@@ -127,6 +127,107 @@
           <p class="cc-activity-empty" id="recentActivityEmpty" hidden>No recent activity yet.</p>
         </section>
       </div>
+
+      <div id="usersRoot" class="cc-users" hidden>
+        <div class="cc-users-toolbar">
+          <div class="cc-users-filters">
+            <label class="cc-field">
+              <span class="cc-field-label">Search</span>
+              <input type="search" id="usersSearch" class="cc-input" placeholder="Search users" autocomplete="off" />
+            </label>
+            <label class="cc-field">
+              <span class="cc-field-label">Memory</span>
+              <select id="usersMemoryFilter" class="cc-select">
+                <option value="">All</option>
+                <option value="connected">Connected</option>
+                <option value="not_connected">Not connected</option>
+              </select>
+            </label>
+            <label class="cc-field">
+              <span class="cc-field-label">Status</span>
+              <select id="usersStatusFilter" class="cc-select">
+                <option value="">All</option>
+                <option value="active">Active</option>
+                <option value="needs_attention">Needs attention</option>
+                <option value="offline">Offline</option>
+              </select>
+            </label>
+          </div>
+          <button type="button" id="usersRefreshBtn" class="cc-btn cc-btn-secondary" aria-label="Refresh Users">
+            Refresh
+          </button>
+        </div>
+
+        <div id="usersStatus" class="cc-overview-status" role="status" aria-live="polite" hidden></div>
+
+        <div id="usersError" class="cc-overview-error" role="alert" hidden>
+          <p>Unable to load users right now.</p>
+          <button type="button" id="usersRetryBtn" class="cc-btn cc-btn-primary">Retry</button>
+        </div>
+
+        <div id="usersEmpty" class="cc-card cc-empty-card" hidden>
+          <h2 class="cc-card-title">No users connected yet</h2>
+          <p class="cc-card-body">Users will appear here after the app registers with the CoffeeAI backend.</p>
+        </div>
+
+        <div id="usersTableCard" class="cc-card cc-users-table-card" aria-busy="true">
+          <p id="usersLoading" class="cc-loading-msg">Loading users…</p>
+          <div class="cc-table-wrap">
+            <table class="cc-users-table" id="usersTable">
+              <thead>
+                <tr>
+                  <th scope="col">User / Device</th>
+                  <th scope="col">Last Active</th>
+                  <th scope="col">App Version</th>
+                  <th scope="col">Memory</th>
+                  <th scope="col">Personality</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Open</th>
+                </tr>
+              </thead>
+              <tbody id="usersTableBody"></tbody>
+            </table>
+          </div>
+          <div class="cc-users-pagination" id="usersPagination">
+            <button type="button" id="usersPrevBtn" class="cc-btn cc-btn-secondary">Previous</button>
+            <p class="cc-users-page-meta" id="usersPageMeta">Page 1</p>
+            <button type="button" id="usersNextBtn" class="cc-btn cc-btn-secondary">Next</button>
+            <p class="cc-users-total" id="usersTotalMeta"></p>
+          </div>
+        </div>
+      </div>
+
+      <div id="userDetailRoot" class="cc-user-detail" hidden>
+        <div class="cc-users-toolbar">
+          <a href="/admin/users" class="cc-btn cc-btn-secondary" id="userDetailBackLink">Back to Users</a>
+          <button type="button" id="userDetailRefreshBtn" class="cc-btn cc-btn-secondary" aria-label="Refresh user detail">
+            Refresh
+          </button>
+        </div>
+
+        <div id="userDetailStatus" class="cc-overview-status" role="status" aria-live="polite" hidden></div>
+
+        <div id="userDetailError" class="cc-overview-error" role="alert" hidden>
+          <p id="userDetailErrorText">Unable to load this user right now.</p>
+          <button type="button" id="userDetailRetryBtn" class="cc-btn cc-btn-primary">Retry</button>
+        </div>
+
+        <div id="userDetailNotFound" class="cc-card cc-empty-card" hidden>
+          <h2 class="cc-card-title">User not found.</h2>
+          <p class="cc-card-body">This device is not available in the Control Center.</p>
+        </div>
+
+        <div id="userDetailCard" class="cc-card" aria-busy="true" hidden>
+          <p id="userDetailLoading" class="cc-loading-msg">Loading user…</p>
+          <h2 class="cc-card-title" id="userDetailTitle">User</h2>
+          <dl class="cc-detail-grid" id="userDetailGrid"></dl>
+          <section class="cc-detail-flows" aria-labelledby="userDetailFlowsTitle">
+            <h3 class="cc-detail-subtitle" id="userDetailFlowsTitle">Recent Action Flows</h3>
+            <ul class="cc-activity-list" id="userDetailFlowsList"></ul>
+            <p class="cc-activity-empty" id="userDetailFlowsEmpty" hidden>No recent Action Flows.</p>
+          </section>
+        </div>
+      </div>
     </main>
   </div>
 
