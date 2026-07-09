@@ -251,6 +251,32 @@ class MemoryStore(ABC):
     @abstractmethod
     async def write_audit(self, entry: dict[str, Any]) -> None: ...
 
+    @abstractmethod
+    async def find_memories_by_request(
+        self, device_id: str, request_id: str, turn_id: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def list_for_novelty(self, device_id: str, limit: int = 200) -> list[dict[str, Any]]: ...
+
+    @abstractmethod
+    async def approve_and_supersede(
+        self,
+        device_id: str,
+        memory_id: str,
+        *,
+        content: str | None = None,
+        reviewed_by: str = "device_user",
+        rejection_reason: str | None = None,
+    ) -> dict[str, Any] | None: ...
+
+
+_LEARNING_PATCH_KEYS = (
+    "content", "summary", "status", "confidence", "importance", "sensitivity", "metadata",
+    "reviewed_at", "reviewed_by", "rejection_reason", "supersedes_memory_id",
+    "normalized_subject", "request_id", "source_turn_id",
+)
+
 
 class InMemoryMemoryStore(MemoryStore):
     durable = False
@@ -261,6 +287,7 @@ class InMemoryMemoryStore(MemoryStore):
         self.documents: dict[str, dict[str, Any]] = {}
         self.chunks: dict[str, dict[str, Any]] = {}
         self.audit: list[dict[str, Any]] = []
+        self.fail_writes: bool = False  # test hook: simulate store failure on writes
 
     async def health(self) -> dict[str, bool | str]:
         return {"readable": True, "writable": True}
@@ -295,7 +322,10 @@ class InMemoryMemoryStore(MemoryStore):
         return self.summaries.pop((device_id, session_id), None) is not None
 
     async def create_memory(self, device_id, data):
+        if self.fail_writes:
+            raise MemoryStoreUnavailable("simulated_write_failure")
         now = utc_now_iso()
+        meta = dict(data.get("metadata") or {})
         row = {
             "id": str(uuid.uuid4()),
             "device_id": device_id,
@@ -314,7 +344,14 @@ class InMemoryMemoryStore(MemoryStore):
             "updated_at": now,
             "last_used_at": None,
             "deleted_at": None,
-            "metadata": data.get("metadata", {}),
+            "metadata": meta,
+            "request_id": data.get("request_id") or meta.get("request_id"),
+            "source_turn_id": data.get("source_turn_id") or meta.get("source_turn_id"),
+            "supersedes_memory_id": data.get("supersedes_memory_id") or meta.get("supersedes_memory_id"),
+            "normalized_subject": data.get("normalized_subject") or meta.get("normalized_subject"),
+            "reviewed_at": data.get("reviewed_at"),
+            "reviewed_by": data.get("reviewed_by"),
+            "rejection_reason": data.get("rejection_reason"),
         }
         self.memories[row["id"]] = row
         return dict(row)
@@ -326,10 +363,12 @@ class InMemoryMemoryStore(MemoryStore):
         return None
 
     async def update_memory(self, device_id, memory_id, patch):
+        if self.fail_writes:
+            raise MemoryStoreUnavailable("simulated_write_failure")
         row = self.memories.get(memory_id)
         if not row or row["device_id"] != device_id or row.get("deleted_at") is not None:
             return None
-        for key in ("content", "summary", "status", "confidence", "importance", "sensitivity", "metadata"):
+        for key in _LEARNING_PATCH_KEYS:
             if key in patch and patch[key] is not None:
                 row[key] = patch[key]
         row["updated_at"] = utc_now_iso()
@@ -455,6 +494,67 @@ class InMemoryMemoryStore(MemoryStore):
     async def write_audit(self, entry):
         self.audit.append(dict(entry))
 
+    async def find_memories_by_request(self, device_id, request_id, turn_id=None):
+        out = []
+        for r in self.memories.values():
+            if r["device_id"] != device_id or r.get("deleted_at") is not None:
+                continue
+            meta = r.get("metadata") or {}
+            rid = r.get("request_id") or meta.get("request_id")
+            if rid != request_id:
+                continue
+            if turn_id is not None:
+                tid = r.get("source_turn_id") or meta.get("source_turn_id")
+                if tid != turn_id:
+                    continue
+            out.append(dict(r))
+        out.sort(key=lambda x: x.get("created_at") or "")
+        return out
+
+    async def list_for_novelty(self, device_id, limit=200):
+        rows = [
+            r for r in self.memories.values()
+            if r["device_id"] == device_id
+            and r.get("deleted_at") is None
+            and r.get("status") in ("proposed", "approved")
+        ]
+        rows.sort(key=lambda r: r["updated_at"], reverse=True)
+        return [dict(r) for r in rows[:limit]]
+
+    async def approve_and_supersede(
+        self, device_id, memory_id, *, content=None, reviewed_by="device_user", rejection_reason=None,
+    ):
+        if self.fail_writes:
+            raise MemoryStoreUnavailable("simulated_write_failure")
+        row = self.memories.get(memory_id)
+        if not row or row["device_id"] != device_id or row.get("deleted_at") is not None:
+            return None
+        if row.get("status") != "proposed":
+            return None
+        now = utc_now_iso()
+        meta = dict(row.get("metadata") or {})
+        supersedes_id = row.get("supersedes_memory_id") or meta.get("supersedes_memory_id")
+        if content is not None:
+            row["content"] = content
+        row["status"] = "approved"
+        row["reviewed_at"] = now
+        row["reviewed_by"] = reviewed_by
+        row["updated_at"] = now
+        if supersedes_id:
+            old = self.memories.get(supersedes_id)
+            if (
+                old
+                and old["device_id"] == device_id
+                and old.get("deleted_at") is None
+                and old.get("status") == "approved"
+            ):
+                old["status"] = "superseded"
+                old["updated_at"] = now
+                meta["superseded_memory_id"] = supersedes_id
+                row["supersedes_memory_id"] = supersedes_id
+        row["metadata"] = meta
+        return dict(row)
+
 
 class SupabaseMemoryStore(MemoryStore):
     """Durable store backed by Supabase PostgREST using the server-only service-role key."""
@@ -560,7 +660,30 @@ class SupabaseMemoryStore(MemoryStore):
             raise MemoryStoreUnavailable(str(exc)) from exc
 
     async def create_memory(self, device_id, data):
-        payload = {**data, "device_id": device_id}
+        # Keep Stage-2 columns + metadata only so inserts work before/without 0003.
+        # Learning provenance lives in metadata (and optional 0003 columns when present).
+        meta = dict(data.get("metadata") or {})
+        for key in (
+            "request_id", "source_turn_id", "supersedes_memory_id",
+            "normalized_subject", "extraction_reason", "consent_state",
+        ):
+            if data.get(key) is not None and key not in meta:
+                meta[key] = data[key]
+        payload = {
+            "device_id": device_id,
+            "type": data["type"],
+            "content": data["content"],
+            "summary": data.get("summary"),
+            "confidence": data.get("confidence", 1.0),
+            "importance": data.get("importance", 0.5),
+            "status": data.get("status", "proposed"),
+            "source": data.get("source", "device"),
+            "source_session_id": data.get("source_session_id"),
+            "language": data.get("language"),
+            "product_version": data.get("product_version"),
+            "sensitivity": data.get("sensitivity", "normal"),
+            "metadata": meta,
+        }
         return await self._insert("memory_items", payload)
 
     async def get_memory(self, device_id, memory_id):
@@ -571,9 +694,22 @@ class SupabaseMemoryStore(MemoryStore):
         return rows[0] if rows else None
 
     async def update_memory(self, device_id, memory_id, patch):
-        clean = {k: v for k, v in patch.items()
-                 if k in ("content", "summary", "status", "confidence", "importance", "sensitivity", "metadata")
-                 and v is not None}
+        # Stage-2 columns only at top level so updates work without migration 0003.
+        # Learning fields (reviewed_*, request_id, supersedes, etc.) live in metadata.
+        base_keys = ("content", "summary", "status", "confidence", "importance", "sensitivity", "metadata")
+        clean: dict[str, Any] = {k: patch[k] for k in base_keys if k in patch and patch[k] is not None}
+        meta = dict(clean.get("metadata") or {})
+        if "metadata" not in patch:
+            existing = await self.get_memory(device_id, memory_id)
+            meta = dict((existing or {}).get("metadata") or {})
+        for key in (
+            "reviewed_at", "reviewed_by", "rejection_reason", "supersedes_memory_id",
+            "normalized_subject", "request_id", "source_turn_id",
+        ):
+            if key in patch and patch[key] is not None:
+                meta[key] = patch[key]
+        if meta:
+            clean["metadata"] = meta
         clean["updated_at"] = utc_now_iso()
         rows = await self._patch("memory_items", {
             "id": f"eq.{memory_id}", "device_id": f"eq.{device_id}", "deleted_at": "is.null",
@@ -615,6 +751,72 @@ class SupabaseMemoryStore(MemoryStore):
             "device_id": f"eq.{device_id}", "deleted_at": "is.null", "status": "eq.approved",
             "type": f"in.({type_filter})", "select": "*", "order": "updated_at.desc", "limit": limit,
         })
+
+    async def find_memories_by_request(self, device_id, request_id, turn_id=None):
+        # Prefer metadata containment; also try request_id column if migration applied.
+        rows = await self._get("memory_items", {
+            "device_id": f"eq.{device_id}",
+            "deleted_at": "is.null",
+            "select": "*",
+            "limit": 50,
+        })
+        out = []
+        for r in rows:
+            meta = r.get("metadata") or {}
+            rid = r.get("request_id") or meta.get("request_id")
+            if rid != request_id:
+                continue
+            if turn_id is not None:
+                tid = r.get("source_turn_id") or meta.get("source_turn_id")
+                if tid != turn_id:
+                    continue
+            out.append(r)
+        return out
+
+    async def list_for_novelty(self, device_id, limit=200):
+        # Fetch proposed + approved; PostgREST or filter
+        proposed = await self._get("memory_items", {
+            "device_id": f"eq.{device_id}", "deleted_at": "is.null",
+            "status": "eq.proposed", "select": "*", "order": "updated_at.desc", "limit": limit,
+        })
+        approved = await self._get("memory_items", {
+            "device_id": f"eq.{device_id}", "deleted_at": "is.null",
+            "status": "eq.approved", "select": "*", "order": "updated_at.desc", "limit": limit,
+        })
+        merged = proposed + approved
+        merged.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
+        return merged[:limit]
+
+    async def approve_and_supersede(
+        self, device_id, memory_id, *, content=None, reviewed_by="device_user", rejection_reason=None,
+    ):
+        del rejection_reason  # approve path only
+        row = await self.get_memory(device_id, memory_id)
+        if not row or row.get("status") != "proposed":
+            return None
+        now = utc_now_iso()
+        meta = dict(row.get("metadata") or {})
+        supersedes_id = row.get("supersedes_memory_id") or meta.get("supersedes_memory_id")
+        meta["reviewed_at"] = now
+        meta["reviewed_by"] = reviewed_by
+        if supersedes_id:
+            meta["supersedes_memory_id"] = supersedes_id
+            meta["superseded_memory_id"] = supersedes_id
+            old = await self.get_memory(device_id, supersedes_id)
+            if old and old.get("status") == "approved":
+                await self.update_memory(device_id, supersedes_id, {"status": "superseded"})
+        patch: dict[str, Any] = {
+            "status": "approved",
+            "metadata": meta,
+            "updated_at": now,
+        }
+        if content is not None:
+            patch["content"] = content
+        rows = await self._patch("memory_items", {
+            "id": f"eq.{memory_id}", "device_id": f"eq.{device_id}", "deleted_at": "is.null",
+            "status": "eq.proposed",
+        }, patch)
+        return rows[0] if rows else None
 
     async def create_document(self, data):
         return await self._insert("knowledge_documents", data)

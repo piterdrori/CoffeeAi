@@ -637,3 +637,24 @@ def hermes_empty_fields() -> dict[str, Any]:
         "compression_applied": False,
         "memory_version": MEMORY_PACKET_VERSION_HERMES,
     }
+
+
+# ---------------- Stage 5 learning coordination (pure; never approves / never writes) ---------
+# Re-export learning helpers so Hermes is the coordination surface. Context retrieval must not
+# call these to persist memory.
+
+from memory_learning import (  # noqa: E402
+    LEARNING_VERSION as HERMES_LEARNING_VERSION,
+    assess_novelty,
+    assess_sensitivity,
+    build_memory_proposals,
+    classify_candidate_type,
+    identify_candidate_facts,
+    propose_consolidation,
+    validate_status_transition,
+)
+
+
+def detect_update_or_conflict(candidate: dict[str, Any], existing: list[dict[str, Any]]) -> dict[str, Any]:
+    """Hermes alias for novelty/update/conflict assessment."""
+    return assess_novelty(candidate, existing)
